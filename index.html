@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Aider AI Support</title>
+  </head>
+  <body style="font-family:sans-serif;max-width:600px;margin:auto;">
+    <h2>AI Customer Support</h2>
+    <textarea id="context" rows="4" cols="60" placeholder="Company context..."></textarea><br><br>
+    <textarea id="message" rows="4" cols="60" placeholder="Customer message..."></textarea><br><br>
+    <button onclick="send()">Get Reply</button>
+    <pre id="reply"></pre>
+
+    <script>
+      async function send() {
+        const context = document.getElementById('context').value;
+        const message = document.getElementById('message').value;
+        const res = await fetch('http://localhost:8000/reply', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ context, message })
+        });
+        const data = await res.json();
+        document.getElementById('reply').innerText = data.reply;
+      }
+    </script>
+  </body>
+</html>
