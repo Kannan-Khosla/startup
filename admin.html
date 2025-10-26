@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Support Admin Panel</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh; padding: 20px;
+    }
+    .container {
+      max-width: 1200px; margin: 0 auto; background: white;
+      border-radius: 20px; box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+      padding: 20px;
+    }
+    h1 { text-align: center; color: #4f46e5; margin-bottom: 10px; }
+    h2 { margin: 20px 0 10px; color: #1e293b; }
+    table {
+      width: 100%; border-collapse: collapse; margin-top: 10px;
+    }
+    th, td {
+      padding: 10px; border-bottom: 1px solid #e5e7eb; text-align: left;
+    }
+    th { background: #f3f4f6; font-weight: 600; color: #374151; }
+    tr:hover { background: #f9fafb; }
+    button {
+      background: #4f46e5; color: white; border: none; padding: 6px 12px;
+      border-radius: 6px; cursor: pointer; font-size: 0.9rem;
+    }
+    button:hover { opacity: 0.9; }
+    .btn-secondary { background: #6b7280; }
+    .btn-danger { background: #dc2626; }
+    .ticket-thread {
+      margin-top: 25px; background: #f8fafc; border-radius: 10px; padding: 15px;
+      border: 1px solid #e5e7eb; max-height: 400px; overflow-y: auto;
+    }
+    .msg { margin-bottom: 15px; padding: 10px; border-radius: 8px; }
+    .msg.customer { background: #e0e7ff; }
+    .msg.ai { background: #dcfce7; text-align: right; }
+    .msg.human { background: #fde68a; }
+    .controls {
+      display: flex; gap: 10px; align-items: center; margin-top: 15px;
+    }
+    .controls input {
+      flex: 1; padding: 10px; border: 2px solid #e5e7eb;
+      border-radius: 8px;
+    }
+    .status-bar {
+      margin-top: 10px; font-size: 0.9rem; color: #4b5563;
+    }
+    .alert {
+      margin-top: 15px; border-radius: 10px; padding: 10px;
+      font-size: 0.9rem; display: none;
+    }
+    .alert.success { background: #f0fdf4; border: 2px solid #bbf7d0; color: #16a34a; }
+    .alert.error { background: #fef2f2; border: 2px solid #fecaca; color: #dc2626; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🧭 AI Support Admin Panel</h1>
+    <p style="text-align:center; color:#6b7280;">Manage Tickets, Assign Agents, and Review Conversations</p>
+
+    <h2>🎟️ All Tickets</h2>
+    <div class="controls" style="margin-bottom:15px;">
+      <select id="statusFilter" onchange="loadTickets()">
+        <option value="">All</option>
+        <option value="open">Open</option>
+        <option value="human_assigned">Assigned</option>
+        <option value="closed">Closed</option>
+      </select>
+      <button class="btn-secondary" onclick="loadTickets()">Refresh</button>
+    </div>
+
+    <table id="ticketTable">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Context</th>
+          <th>Subject</th>
+          <th>Status</th>
+          <th>Assigned To</th>
+          <th>Updated</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+
+    <div id="threadSection" style="display:none;">
+      <h2>💬 Ticket Thread</h2>
+      <div id="thread" class="ticket-thread"></div>
+
+      <div class="controls">
+        <input id="agentName" placeholder="Assign to agent..." />
+        <button onclick="assignAgent()">Assign</button>
+        <button class="btn-danger" onclick="closeTicket()">Close</button>
+      </div>
+
+      <div class="alert success" id="msgBox"></div>
+      <div class="alert error" id="errBox"></div>
+
+      <div class="status-bar" id="ticketInfo"></div>
+    </div>
+  </div>
+
+  <script>
+    const API_BASE = "http://localhost:8000";
+    let currentTicketId = null;
+
+    function showAlert(type, msg) {
+      const box = document.getElementById(type === "error" ? "errBox" : "msgBox");
+      box.textContent = msg;
+      box.style.display = "block";
+      setTimeout(() => (box.style.display = "none"), 4000);
+    }
+
+    async function loadTickets() {
+      const status = document.getElementById("statusFilter").value;
+      try {
+        const res = await fetch(`${API_BASE}/admin/tickets${status ? "?status=" + status : ""}`);
+        const data = await res.json();
+        const tbody = document.querySelector("#ticketTable tbody");
+        if (res.ok && data.tickets) {
+          tbody.innerHTML = data.tickets
+            .map(t => `
+              <tr>
+                <td>${t.id}</td>
+                <td>${t.context}</td>
+                <td>${t.subject}</td>
+                <td>${t.status}</td>
+                <td>${t.assigned_to || "-"}</td>
+                <td>${new Date(t.updated_at || t.created_at).toLocaleString()}</td>
+                <td>
+                  <button onclick="viewThread('${t.id}')">View</button>
+                </td>
+              </tr>
+            `).join('');
+        } else {
+          tbody.innerHTML = `<tr><td colspan="7">No tickets found.</td></tr>`;
+        }
+      } catch (e) {
+        showAlert("error", "Failed to load tickets: " + e.message);
+      }
+    }
+
+    async function viewThread(ticketId) {
+      currentTicketId = ticketId;
+      const threadSection = document.getElementById("threadSection");
+      const threadBox = document.getElementById("thread");
+      const info = document.getElementById("ticketInfo");
+
+      try {
+        const res = await fetch(`${API_BASE}/ticket/${ticketId}`);
+        const data = await res.json();
+        if (!data.messages) {
+          threadBox.innerHTML = "<div>No messages found.</div>";
+        } else {
+          threadBox.innerHTML = data.messages.map(m =>
+            `<div class="msg ${m.sender}">
+              <strong>${m.sender}:</strong> ${m.message}
+            </div>`
+          ).join('');
+        }
+        info.textContent = `Ticket ID: ${ticketId} | Status: ${data.ticket.status} | Assigned to: ${data.ticket.assigned_to || "none"}`;
+        threadSection.style.display = "block";
+      } catch (e) {
+        showAlert("error", "Error loading thread: " + e.message);
+      }
+    }
+
+    async function assignAgent() {
+      const agent = document.getElementById("agentName").value.trim();
+      if (!agent) return showAlert("error", "Enter agent name first.");
+      if (!currentTicketId) return showAlert("error", "Select a ticket.");
+
+      try {
+        const res = await fetch(`${API_BASE}/admin/ticket/${currentTicketId}/assign?agent_name=${encodeURIComponent(agent)}`, {
+          method: "POST"
+        });
+        const data = await res.json();
+        if (res.ok && data.success) {
+          showAlert("success", data.message);
+          await loadTickets();
+          await viewThread(currentTicketId);
+        } else showAlert("error", data.error || "Assignment failed.");
+      } catch (e) {
+        showAlert("error", e.message);
+      }
+    }
+
+    async function closeTicket() {
+      if (!currentTicketId) return showAlert("error", "Select a ticket first.");
+      try {
+        const res = await fetch(`${API_BASE}/admin/ticket/${currentTicketId}/close`, { method: "POST" });
+        const data = await res.json();
+        if (res.ok && data.success) {
+          showAlert("success", data.message);
+          await loadTickets();
+          document.getElementById("threadSection").style.display = "none";
+        } else showAlert("error", data.error || "Failed to close ticket.");
+      } catch (e) {
+        showAlert("error", e.message);
+      }
+    }
+
+    document.addEventListener("DOMContentLoaded", loadTickets);
+  </script>
+</body>
+</html>

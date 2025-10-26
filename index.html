@@ -1,27 +1,241 @@
 <!DOCTYPE html>
-<html>
-  <head>
-    <title>Aider AI Support</title>
-  </head>
-  <body style="font-family:sans-serif;max-width:600px;margin:auto;">
-    <h2>AI Customer Support</h2>
-    <textarea id="context" rows="4" cols="60" placeholder="Company context..."></textarea><br><br>
-    <textarea id="message" rows="4" cols="60" placeholder="Customer message..."></textarea><br><br>
-    <button onclick="send()">Get Reply</button>
-    <pre id="reply"></pre>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Support Dashboard</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      padding: 20px;
+    }
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+      background: white;
+      border-radius: 20px;
+      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+      overflow: hidden;
+    }
+    .header {
+      background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);
+      color: white;
+      padding: 30px;
+      text-align: center;
+    }
+    .header h1 { font-size: 2.5rem; margin-bottom: 10px; }
+    .main-content {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 30px; padding: 30px;
+    }
+    .chat-section, .stats-section {
+      background: #f8fafc; border-radius: 15px; padding: 25px;
+    }
+    .section-title { font-size: 1.5rem; font-weight: 600; margin-bottom: 20px; color: #1e293b; }
+    textarea, input, select {
+      width: 100%; padding: 12px 16px; border: 2px solid #e5e7eb;
+      border-radius: 10px; font-size: 14px; transition: border-color 0.3s ease;
+    }
+    textarea:focus, input:focus, select:focus { outline: none; border-color: #4f46e5; }
+    .btn {
+      background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);
+      color: white; border: none; padding: 12px 24px; border-radius: 10px;
+      font-size: 16px; font-weight: 500; cursor: pointer;
+      transition: transform 0.2s ease;
+    }
+    .btn:hover { transform: translateY(-2px); }
+    .btn-secondary { background: #6b7280; }
+    .ticket-thread { margin-top: 20px; background: #fff; border-radius: 10px;
+      padding: 15px; border: 1px solid #e5e7eb; max-height: 400px; overflow-y: auto; }
+    .msg { margin-bottom: 15px; padding: 10px; border-radius: 8px; }
+    .msg.customer { background: #e0e7ff; text-align: left; }
+    .msg.ai { background: #dcfce7; text-align: right; }
+    .success, .error { margin-top: 15px; border-radius: 10px; padding: 15px; }
+    .success { background: #f0fdf4; border: 2px solid #bbf7d0; color: #16a34a; }
+    .error { background: #fef2f2; border: 2px solid #fecaca; color: #dc2626; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>🤖 AI Support Dashboard</h1>
+      <p>AI-Powered Ticket Chat with Human Takeover</p>
+    </div>
 
-    <script>
-      async function send() {
-        const context = document.getElementById('context').value;
-        const message = document.getElementById('message').value;
-        const res = await fetch('http://localhost:8000/reply', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ context, message })
+    <div class="main-content">
+      <!-- Chat Section -->
+      <div class="chat-section">
+        <h2 class="section-title">💬 Manage Tickets</h2>
+
+        <!-- Create New Ticket -->
+        <div style="margin-bottom: 20px;">
+          <h3 style="margin-bottom:10px;">🆕 Create New Ticket</h3>
+          <div class="form-group">
+            <label>Context</label>
+            <textarea id="context" rows="2" placeholder="e.g. E-commerce store"></textarea>
+          </div>
+          <div class="form-group">
+            <label>Subject</label>
+            <input id="subject" placeholder="e.g. Login issue" />
+          </div>
+          <div class="form-group">
+            <label>Message</label>
+            <textarea id="message" rows="3" placeholder="Type customer message..."></textarea>
+          </div>
+          <button class="btn" id="sendBtn" onclick="sendMessage()">Send</button>
+        </div>
+
+        <hr style="margin:20px 0;">
+
+        <!-- Continue Existing Ticket -->
+        <div style="margin-bottom: 20px;">
+          <h3 style="margin-bottom:10px;">🔁 Continue Existing Ticket</h3>
+          <select id="ticketSelect"></select>
+          <textarea id="followup" rows="3" placeholder="Write your follow-up message..."></textarea>
+          <button class="btn btn-secondary" onclick="replyToTicket()">Send Follow-up</button>
+        </div>
+
+        <!-- Thread Display -->
+        <div id="thread" class="ticket-thread" style="display:none;"></div>
+        <div id="msg" class="success" style="display:none;"></div>
+        <div id="err" class="error" style="display:none;"></div>
+      </div>
+
+      <!-- Stats Section -->
+      <div class="stats-section">
+        <h2 class="section-title">📊 Ticket Statistics</h2>
+        <div class="stat-card">
+          <div style="font-size:2rem;font-weight:700;color:#4f46e5;" id="totalTickets">-</div>
+          <div>Total Tickets</div>
+        </div>
+        <div class="stat-card" style="margin-top:15px;">
+          <div style="font-size:2rem;font-weight:700;color:#4f46e5;" id="openTickets">-</div>
+          <div>Open Tickets</div>
+        </div>
+        <div class="stat-card" style="margin-top:15px;">
+          <div style="font-size:2rem;font-weight:700;color:#4f46e5;" id="closedTickets">-</div>
+          <div>Closed Tickets</div>
+        </div>
+        <button class="btn btn-secondary" style="margin-top:20px;" onclick="loadStats()">Refresh Stats</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const API_BASE = "http://localhost:8000";
+
+    function showMessage(isError, text) {
+      const box = document.getElementById(isError ? "err" : "msg");
+      box.textContent = text;
+      box.style.display = "block";
+      setTimeout(() => (box.style.display = "none"), 4000);
+    }
+
+    async function sendMessage() {
+      const context = document.getElementById("context").value.trim();
+      const subject = document.getElementById("subject").value.trim();
+      const message = document.getElementById("message").value.trim();
+      const btn = document.getElementById("sendBtn");
+      if (!context || !subject || !message) return showMessage(true, "Please fill all fields.");
+
+      btn.disabled = true;
+      try {
+        const res = await fetch(`${API_BASE}/ticket`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ context, subject, message }),
         });
         const data = await res.json();
-        document.getElementById('reply').innerText = data.reply;
+        if (res.ok && data.ticket_id) {
+          showMessage(false, "Ticket created successfully!");
+          await loadThread(data.ticket_id);
+          await loadTickets();
+          loadStats();
+        } else showMessage(true, data.error || "Failed to create ticket.");
+      } catch (e) {
+        showMessage(true, e.message);
+      } finally {
+        btn.disabled = false;
       }
-    </script>
-  </body>
+    }
+
+    async function replyToTicket() {
+      const ticketId = document.getElementById("ticketSelect").value;
+      const message = document.getElementById("followup").value.trim();
+      if (!ticketId) return showMessage(true, "Select a ticket.");
+      if (!message) return showMessage(true, "Enter a follow-up message.");
+
+      try {
+        const res = await fetch(`${API_BASE}/ticket/${ticketId}/reply`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message }),
+        });
+        const data = await res.json();
+        if (res.ok && data.reply) {
+          showMessage(false, "AI replied successfully!");
+          await loadThread(ticketId);
+        } else showMessage(true, data.error || "Failed to send follow-up.");
+      } catch (e) {
+        showMessage(true, "Network error: " + e.message);
+      }
+    }
+
+    async function loadThread(ticketId) {
+      try {
+        const res = await fetch(`${API_BASE}/ticket/${ticketId}`);
+        const data = await res.json();
+        const box = document.getElementById("thread");
+        if (!data.messages || !data.messages.length) {
+          box.innerHTML = "<div>No messages yet.</div>";
+        } else {
+          box.innerHTML = data.messages
+            .map(m => `<div class="msg ${m.sender}"><strong>${m.sender}:</strong> ${m.message}</div>`)
+            .join("");
+        }
+        box.style.display = "block";
+      } catch (e) {
+        showMessage(true, "Error loading thread: " + e.message);
+      }
+    }
+
+    async function loadTickets() {
+      try {
+        const res = await fetch(`${API_BASE}/stats`);
+        const data = await res.json();
+        const select = document.getElementById("ticketSelect");
+        if (res.ok && data.sample_summary) {
+          select.innerHTML =
+            `<option value="">-- Select a Ticket --</option>` +
+            data.sample_summary
+              .map(t => `<option value="${t.ticket_id}">${t.subject} (${t.context})</option>`)
+              .join("");
+        }
+      } catch (e) {
+        console.error("Error loading tickets", e);
+      }
+    }
+
+    async function loadStats() {
+      try {
+        const res = await fetch(`${API_BASE}/stats`);
+        const data = await res.json();
+        if (res.ok) {
+          document.getElementById("totalTickets").textContent = data.total_tickets ?? 0;
+          document.getElementById("openTickets").textContent = data.open_tickets ?? 0;
+          document.getElementById("closedTickets").textContent = data.closed_tickets ?? 0;
+        }
+      } catch (e) {
+        console.error("Stats load error", e);
+      }
+    }
+
+    document.addEventListener("DOMContentLoaded", async () => {
+      await loadStats();
+      await loadTickets();
+    });
+  </script>
+</body>
 </html>
