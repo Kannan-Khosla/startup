@@ -1,12 +1,15 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi import Header, HTTPException, status, Depends
 from pydantic import BaseModel
 from openai import OpenAI
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 from pathlib import Path
 from dotenv import load_dotenv
 from supabase_config import supabase
+import re
+import time
 
 # Load environment variables - explicit path
 BASE_DIR = Path(__file__).resolve().parent
@@ -59,7 +62,96 @@ class MessageRequest(BaseModel):
 
 @app.get("/")
 def health_check():
+    """Simple health check.
+
+    Returns
+    -------
+    dict
+        `{ "message": "..." }` indicating the API is up.
+    """
     return {"message": "AI Support API (threaded system) is running"}
+
+
+# ---------------------------
+# 🔐 ADMIN AUTH
+# ---------------------------
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN")
+
+
+def require_admin(x_admin_token: str | None = Header(default=None)):
+    if not ADMIN_TOKEN:
+        # If no token configured, allow all (dev mode)
+        return
+    if x_admin_token != ADMIN_TOKEN:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing admin token",
+        )
+
+
+# ---------------------------
+# 🛡️ RELIABILITY & GUARDRAILS
+# ---------------------------
+AI_REPLY_WINDOW_SECONDS = int(os.getenv("AI_REPLY_WINDOW_SECONDS", "60"))
+AI_REPLY_MAX_PER_WINDOW = int(os.getenv("AI_REPLY_MAX_PER_WINDOW", "2"))
+
+
+def is_rate_limited(ticket_id: str) -> tuple[bool, dict]:
+    try:
+        window_start = (datetime.utcnow() - timedelta(seconds=AI_REPLY_WINDOW_SECONDS)).isoformat()
+        count = (
+            supabase.table("messages")
+            .select("id", count="exact")
+            .eq("ticket_id", ticket_id)
+            .eq("sender", "ai")
+            .gte("created_at", window_start)
+            .execute()
+            .count
+        )
+        limited = count >= AI_REPLY_MAX_PER_WINDOW
+        return limited, {"ai_replies_in_window": count}
+    except Exception:
+        return False, {}
+
+
+PROFANITY = re.compile(r"\b(fuck|shit|bitch|asshole)\b", re.IGNORECASE)
+EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+PHONE = re.compile(r"(?:\+?\d[\s-]?)?(?:\(?\d{3}\)?[\s-]?)?\d{3}[\s-]?\d{4}")
+CC = re.compile(r"\b(?:\d[ -]*?){13,19}\b")
+
+
+def sanitize_output(text: str) -> tuple[str, dict]:
+    redacted = text or ""
+    flags = {"profanity": False, "email": False, "phone": False, "cc": False}
+    if PROFANITY.search(redacted):
+        flags["profanity"] = True
+        redacted = PROFANITY.sub("***", redacted)
+    if EMAIL.search(redacted):
+        flags["email"] = True
+        redacted = EMAIL.sub("***@***.***", redacted)
+    if PHONE.search(redacted):
+        flags["phone"] = True
+        redacted = PHONE.sub("***-***-****", redacted)
+    if CC.search(redacted):
+        flags["cc"] = True
+        redacted = CC.sub("**** **** **** ****", redacted)
+    return redacted, flags
+
+
+def generate_ai_reply(prompt: str) -> str:
+    delays = [0.5, 1.0, 2.0]
+    for i in range(len(delays) + 1):
+        try:
+            completion = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return completion.choices[0].message.content
+        except Exception as e:
+            if i < len(delays):
+                time.sleep(delays[i])
+            else:
+                raise e
 
 
 # ---------------------------------------------------
@@ -67,9 +159,17 @@ def health_check():
 # ---------------------------------------------------
 @app.post("/ticket")
 def create_or_continue_ticket(req: TicketRequest):
-    """
-    Create a new ticket (if not exists) or continue an open one.
-    AI replies only if no human agent is assigned.
+    """Create or continue a ticket and optionally generate an AI reply.
+
+    Parameters
+    ----------
+    req : TicketRequest
+        `{ context, subject, message }`
+
+    Returns
+    -------
+    dict
+        `{ ticket_id, reply? }` or `{ ticket_id, rate_limited, wait_seconds }`
     """
     try:
         if supabase is None:
@@ -150,12 +250,17 @@ def create_or_continue_ticket(req: TicketRequest):
         Reply as the assistant:
         """
 
+        # 5.1️⃣ Rate limit check
+        limited, _meta = is_rate_limited(ticket_id)
+        if limited:
+            return {"ticket_id": ticket_id, "rate_limited": True, "wait_seconds": AI_REPLY_WINDOW_SECONDS}
+
+        # 5.2️⃣ Generate AI reply with retry/backoff
         print("🤖 Calling OpenAI model...")
-        completion = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-        )
-        answer = completion.choices[0].message.content
+        raw_answer = generate_ai_reply(prompt)
+
+        # 5.3️⃣ Sanitize output for profanity/PII
+        answer, flags = sanitize_output(raw_answer)
 
         # 6️⃣ Store AI reply
         supabase.table("messages").insert(
@@ -181,9 +286,10 @@ def create_or_continue_ticket(req: TicketRequest):
 # ---------------------------------------------------
 @app.post("/ticket/{ticket_id}/reply")
 def reply_to_existing_ticket(ticket_id: str, req: MessageRequest):
-    """
-    Continue an existing thread (customer follow-up).
-    AI replies if ticket is unassigned to a human.
+    """Append a customer message and optionally generate an AI reply.
+
+    If a human is assigned, AI reply is skipped.
+    Rate limiting and output sanitization apply if AI is used.
     """
     try:
         if supabase is None:
@@ -237,11 +343,16 @@ def reply_to_existing_ticket(ticket_id: str, req: MessageRequest):
         Respond concisely and politely as the assistant.
         """
 
-        completion = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-        )
-        answer = completion.choices[0].message.content
+        # 5.1️⃣ Rate limit check
+        limited, _meta = is_rate_limited(ticket_id)
+        if limited:
+            return {"ticket_id": ticket_id, "rate_limited": True, "wait_seconds": AI_REPLY_WINDOW_SECONDS}
+
+        # 5.2️⃣ Generate AI reply with retry/backoff
+        raw_answer = generate_ai_reply(prompt)
+
+        # 5.3️⃣ Sanitize output for profanity/PII
+        answer, flags = sanitize_output(raw_answer)
 
         # 6️⃣ Store AI reply
         supabase.table("messages").insert(
@@ -266,6 +377,7 @@ def reply_to_existing_ticket(ticket_id: str, req: MessageRequest):
 # ---------------------------------------------------
 @app.get("/ticket/{ticket_id}")
 def get_ticket_thread(ticket_id: str):
+    """Fetch a ticket and its full message thread ordered by time."""
     try:
         if supabase is None:
             return {"error": "Supabase is not configured. Please set SUPABASE_URL and SUPABASE_KEY in .env file"}
@@ -293,7 +405,7 @@ def get_ticket_thread(ticket_id: str):
 # ---------------------------------------------------
 @app.get("/stats")
 def get_stats():
-    """Fetch ticket metrics from Supabase view."""
+    """Fetch ticket metrics and a sample from the `ticket_summary` view."""
     try:
         total = supabase.table("tickets").select("id", count="exact").execute().count
         open_t = (
@@ -327,7 +439,7 @@ def get_stats():
 
 @app.get("/admin/tickets")
 def admin_get_all_tickets(status: str = None):
-    """List all tickets, filter by status if given."""
+    """List all tickets, optionally filtered by `status`."""
     try:
         if supabase is None:
             return {"error": "Supabase is not configured. Please set SUPABASE_URL and SUPABASE_KEY in .env file"}
@@ -342,8 +454,8 @@ def admin_get_all_tickets(status: str = None):
 
 
 @app.post("/admin/ticket/{ticket_id}/assign")
-def assign_agent(ticket_id: str, agent_name: str):
-    """Assign a human agent and disable AI replies."""
+def assign_agent(ticket_id: str, agent_name: str, _: None = Depends(require_admin)):
+    """Assign a human agent and move ticket to `human_assigned`."""
     try:
         if supabase is None:
             return {"error": "Supabase is not configured. Please set SUPABASE_URL and SUPABASE_KEY in .env file"}
@@ -360,8 +472,8 @@ def assign_agent(ticket_id: str, agent_name: str):
 
 
 @app.post("/admin/ticket/{ticket_id}/close")
-def close_ticket(ticket_id: str):
-    """Mark ticket as closed."""
+def close_ticket(ticket_id: str, _: None = Depends(require_admin)):
+    """Mark the ticket `closed`. Requires admin token if configured."""
     try:
         if supabase is None:
             return {"error": "Supabase is not configured. Please set SUPABASE_URL and SUPABASE_KEY in .env file"}
