@@ -1,34 +1,31 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import Header, HTTPException, status, Depends
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from pydantic import BaseModel
 from openai import OpenAI
 from datetime import datetime, timedelta
-import os
-from pathlib import Path
-from dotenv import load_dotenv
 from supabase_config import supabase
+from config import settings
+from logger import setup_logger
+from middleware import error_handler, http_exception_handler, validation_exception_handler
 import re
 import time
 
-# Load environment variables - explicit path
-BASE_DIR = Path(__file__).resolve().parent
-env_path = BASE_DIR / ".env"
-if env_path.exists():
-    load_dotenv(dotenv_path=env_path)
-    print(f"✅ main.py: Loaded .env from: {env_path}")
-else:
-    load_dotenv()
-    print(f"⚠️ main.py: No .env found at {env_path}")
+# Set up logging
+logger = setup_logger(__name__)
 
-# Debug: Print environment variables
-print("🔍 Checking environment variables...")
-print(f"SUPABASE_URL: {os.getenv('SUPABASE_URL')}")
-print(f"SUPABASE_KEY exists: {bool(os.getenv('SUPABASE_KEY'))}")
-print(f"OPENAI_API_KEY exists: {bool(os.getenv('OPENAI_API_KEY'))}")
+# Initialize OpenAI client
+client = OpenAI(api_key=settings.openai_api_key)
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-app = FastAPI()
+# Create FastAPI app
+app = FastAPI(title="AI Support API", version="1.0.0")
+
+# Register error handlers
+app.add_exception_handler(Exception, error_handler)
+app.add_exception_handler(StarletteHTTPException, http_exception_handler)
+app.add_exception_handler(RequestValidationError, validation_exception_handler)
 
 # Enable CORS
 app.add_middleware(
@@ -75,14 +72,14 @@ def health_check():
 # ---------------------------
 # 🔐 ADMIN AUTH
 # ---------------------------
-ADMIN_TOKEN = os.getenv("ADMIN_TOKEN")
-
-
 def require_admin(x_admin_token: str | None = Header(default=None)):
-    if not ADMIN_TOKEN:
+    """Validate admin token if configured."""
+    if not settings.admin_token:
         # If no token configured, allow all (dev mode)
+        logger.warning("Admin token not configured - admin endpoints are unprotected")
         return
-    if x_admin_token != ADMIN_TOKEN:
+    if x_admin_token != settings.admin_token:
+        logger.warning(f"Invalid admin token attempt from {x_admin_token}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or missing admin token",
@@ -92,13 +89,12 @@ def require_admin(x_admin_token: str | None = Header(default=None)):
 # ---------------------------
 # 🛡️ RELIABILITY & GUARDRAILS
 # ---------------------------
-AI_REPLY_WINDOW_SECONDS = int(os.getenv("AI_REPLY_WINDOW_SECONDS", "60"))
-AI_REPLY_MAX_PER_WINDOW = int(os.getenv("AI_REPLY_MAX_PER_WINDOW", "2"))
-
-
 def is_rate_limited(ticket_id: str) -> tuple[bool, dict]:
+    """Check if ticket has exceeded AI reply rate limit."""
     try:
-        window_start = (datetime.utcnow() - timedelta(seconds=AI_REPLY_WINDOW_SECONDS)).isoformat()
+        window_start = (
+            datetime.utcnow() - timedelta(seconds=settings.ai_reply_window_seconds)
+        ).isoformat()
         count = (
             supabase.table("messages")
             .select("id", count="exact")
@@ -108,13 +104,18 @@ def is_rate_limited(ticket_id: str) -> tuple[bool, dict]:
             .execute()
             .count
         )
-        limited = count >= AI_REPLY_MAX_PER_WINDOW
+        limited = count >= settings.ai_reply_max_per_window
+        if limited:
+            logger.warning(
+                f"Rate limit exceeded for ticket {ticket_id}: {count} replies in window"
+            )
         return limited, {"ai_replies_in_window": count}
-    except Exception:
+    except Exception as e:
+        logger.error(f"Error checking rate limit for ticket {ticket_id}: {e}")
         return False, {}
 
 
-PROFANITY = re.compile(r"\b(fuck|shit|bitch|asshole)\b", re.IGNORECASE)
+PROFANITY = re.compile(r"\b(fuck|shit|bitch|asshole)(?:ing|s|ed)?\b", re.IGNORECASE)
 EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 PHONE = re.compile(r"(?:\+?\d[\s-]?)?(?:\(?\d{3}\)?[\s-]?)?\d{3}[\s-]?\d{4}")
 CC = re.compile(r"\b(?:\d[ -]*?){13,19}\b")
@@ -129,28 +130,58 @@ def sanitize_output(text: str) -> tuple[str, dict]:
     if EMAIL.search(redacted):
         flags["email"] = True
         redacted = EMAIL.sub("***@***.***", redacted)
-    if PHONE.search(redacted):
-        flags["phone"] = True
-        redacted = PHONE.sub("***-***-****", redacted)
+    # Check CC before PHONE to avoid phone regex matching credit card numbers
     if CC.search(redacted):
         flags["cc"] = True
         redacted = CC.sub("**** **** **** ****", redacted)
+    if PHONE.search(redacted):
+        flags["phone"] = True
+        redacted = PHONE.sub("***-***-****", redacted)
     return redacted, flags
 
 
 def generate_ai_reply(prompt: str) -> str:
-    delays = [0.5, 1.0, 2.0]
-    for i in range(len(delays) + 1):
+    """
+    Generate AI reply with exponential backoff retry logic.
+    
+    Parameters
+    ----------
+    prompt : str
+        The prompt to send to OpenAI
+    
+    Returns
+    -------
+    str
+        The generated AI reply
+    
+    Raises
+    ------
+    Exception
+        If all retry attempts fail
+    """
+    delay = settings.openai_initial_delay
+    max_retries = settings.openai_max_retries
+    
+    for attempt in range(max_retries + 1):
         try:
+            logger.debug(f"Calling OpenAI API (attempt {attempt + 1}/{max_retries + 1})")
             completion = client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[{"role": "user", "content": prompt}],
             )
-            return completion.choices[0].message.content
+            response = completion.choices[0].message.content
+            logger.debug("OpenAI API call successful")
+            return response
         except Exception as e:
-            if i < len(delays):
-                time.sleep(delays[i])
+            if attempt < max_retries:
+                logger.warning(
+                    f"OpenAI API call failed (attempt {attempt + 1}/{max_retries + 1}): {e}. "
+                    f"Retrying in {delay:.2f}s..."
+                )
+                time.sleep(delay)
+                delay *= settings.openai_backoff_multiplier
             else:
+                logger.error(f"OpenAI API call failed after {max_retries + 1} attempts: {e}")
                 raise e
 
 
@@ -189,7 +220,7 @@ def create_or_continue_ticket(req: TicketRequest):
         if existing.data:
             ticket = existing.data[0]
             ticket_id = ticket["id"]
-            print(f"🧾 Continuing existing ticket: {ticket_id}")
+            logger.info(f"Continuing existing ticket: {ticket_id}")
         else:
             # Create new ticket
             new_ticket = (
@@ -206,7 +237,7 @@ def create_or_continue_ticket(req: TicketRequest):
             )
             ticket = new_ticket.data[0]
             ticket_id = ticket["id"]
-            print(f"🆕 Created new ticket: {ticket_id}")
+            logger.info(f"Created new ticket: {ticket_id}")
 
         # 2️⃣ Add customer message
         supabase.table("messages").insert(
@@ -220,8 +251,8 @@ def create_or_continue_ticket(req: TicketRequest):
 
         # 3️⃣ Check if human is assigned — skip AI if true
         if ticket.get("assigned_to"):
-            print(
-                f"🙋 Human agent assigned ({ticket['assigned_to']}), skipping AI reply."
+            logger.info(
+                f"Human agent assigned ({ticket['assigned_to']}), skipping AI reply for ticket {ticket_id}"
             )
             return {
                 "ticket_id": ticket_id,
@@ -253,10 +284,14 @@ def create_or_continue_ticket(req: TicketRequest):
         # 5.1️⃣ Rate limit check
         limited, _meta = is_rate_limited(ticket_id)
         if limited:
-            return {"ticket_id": ticket_id, "rate_limited": True, "wait_seconds": AI_REPLY_WINDOW_SECONDS}
+            return {
+                "ticket_id": ticket_id,
+                "rate_limited": True,
+                "wait_seconds": settings.ai_reply_window_seconds,
+            }
 
         # 5.2️⃣ Generate AI reply with retry/backoff
-        print("🤖 Calling OpenAI model...")
+        logger.info(f"Generating AI reply for ticket {ticket_id}")
         raw_answer = generate_ai_reply(prompt)
 
         # 5.3️⃣ Sanitize output for profanity/PII
@@ -277,8 +312,8 @@ def create_or_continue_ticket(req: TicketRequest):
         return {"ticket_id": ticket_id, "reply": answer}
 
     except Exception as e:
-        print(f"❌ ERROR: {e}")
-        return {"error": str(e)}
+        logger.error(f"Error in create_or_continue_ticket: {e}", exc_info=True)
+        raise
 
 
 # ---------------------------------------------------
@@ -316,7 +351,9 @@ def reply_to_existing_ticket(ticket_id: str, req: MessageRequest):
 
         # 3️⃣ If human assigned, skip AI
         if ticket.get("assigned_to"):
-            print(f"🙋 Human assigned ({ticket['assigned_to']}), skipping AI.")
+            logger.info(
+                f"Human assigned ({ticket['assigned_to']}), skipping AI for ticket {ticket_id}"
+            )
             return {
                 "ticket_id": ticket_id,
                 "reply": f"Human agent {ticket['assigned_to']} will handle this.",
@@ -346,7 +383,11 @@ def reply_to_existing_ticket(ticket_id: str, req: MessageRequest):
         # 5.1️⃣ Rate limit check
         limited, _meta = is_rate_limited(ticket_id)
         if limited:
-            return {"ticket_id": ticket_id, "rate_limited": True, "wait_seconds": AI_REPLY_WINDOW_SECONDS}
+            return {
+                "ticket_id": ticket_id,
+                "rate_limited": True,
+                "wait_seconds": settings.ai_reply_window_seconds,
+            }
 
         # 5.2️⃣ Generate AI reply with retry/backoff
         raw_answer = generate_ai_reply(prompt)
@@ -369,7 +410,8 @@ def reply_to_existing_ticket(ticket_id: str, req: MessageRequest):
         return {"ticket_id": ticket_id, "reply": answer}
 
     except Exception as e:
-        return {"error": str(e)}
+        logger.error(f"Error in reply_to_existing_ticket: {e}", exc_info=True)
+        raise
 
 
 # ---------------------------------------------------
@@ -397,7 +439,8 @@ def get_ticket_thread(ticket_id: str):
             "messages": messages.data,
         }
     except Exception as e:
-        return {"error": str(e)}
+        logger.error(f"Error in get_ticket_thread: {e}", exc_info=True)
+        raise
 
 
 # ---------------------------------------------------
@@ -434,7 +477,8 @@ def get_stats():
         }
 
     except Exception as e:
-        return {"error": f"Failed to fetch stats: {str(e)}"}
+        logger.error(f"Error in get_stats: {e}", exc_info=True)
+        raise
 
 
 @app.get("/admin/tickets")
@@ -450,7 +494,8 @@ def admin_get_all_tickets(status: str = None):
         res = query.execute()
         return {"tickets": res.data}
     except Exception as e:
-        return {"error": str(e)}
+        logger.error(f"Error in admin_get_all_tickets: {e}", exc_info=True)
+        raise
 
 
 @app.post("/admin/ticket/{ticket_id}/assign")
@@ -468,7 +513,8 @@ def assign_agent(ticket_id: str, agent_name: str, _: None = Depends(require_admi
             "message": f"Ticket {ticket_id} assigned to {agent_name}",
         }
     except Exception as e:
-        return {"error": str(e)}
+        logger.error(f"Error in assign_agent: {e}", exc_info=True)
+        raise
 
 
 @app.post("/admin/ticket/{ticket_id}/close")
@@ -483,4 +529,5 @@ def close_ticket(ticket_id: str, _: None = Depends(require_admin)):
         ).eq("id", ticket_id).execute()
         return {"success": True, "message": f"Ticket {ticket_id} closed successfully"}
     except Exception as e:
-        return {"error": str(e)}
+        logger.error(f"Error in close_ticket: {e}", exc_info=True)
+        raise
