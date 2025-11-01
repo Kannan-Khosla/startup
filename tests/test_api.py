@@ -1,5 +1,5 @@
 """Integration tests for API endpoints."""
-import pytest
+
 from unittest.mock import Mock, MagicMock, patch
 from fastapi import status
 
