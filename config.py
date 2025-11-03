@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     openai_max_retries: int = Field(default=3, description="Max retry attempts for OpenAI API calls")
     openai_initial_delay: float = Field(default=0.5, description="Initial retry delay in seconds")
     openai_backoff_multiplier: float = Field(default=2.0, description="Backoff multiplier for retries")
+    
+    # JWT configuration
+    jwt_secret_key: str = Field(default="your-secret-key-change-in-production", description="JWT secret key for token signing")
+    jwt_token_expire_hours: int = Field(default=24, description="JWT token expiration time in hours")
 
     model_config = SettingsConfigDict(
         env_file=".env",

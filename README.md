@@ -8,7 +8,22 @@ A FastAPI-based AI support ticketing system with Supabase integration.
 .
 ├── main.py              # FastAPI application
 ├── supabase_config.py   # Supabase client configuration
-├── tester.html          # Frontend interface (chat UI + admin actions)
+├── config.py            # Configuration management (Pydantic Settings)
+├── logger.py            # Logging configuration
+├── middleware.py        # Error handling middleware
+├── tester.html          # Legacy frontend interface (chat UI + admin actions)
+├── frontend/            # React frontend application
+│   ├── src/
+│   │   ├── components/  # React components
+│   │   ├── contexts/     # React Context for state
+│   │   ├── services/     # API service layer
+│   │   └── ...
+│   ├── package.json     # Node.js dependencies
+│   └── vite.config.js   # Vite configuration
+├── tests/               # Test suite
+│   ├── test_api.py      # Integration tests
+│   ├── test_helpers.py  # Unit tests
+│   └── conftest.py      # Pytest fixtures
 ├── docs/                # Project documentation
 │   ├── README.md        # Docs index
 │   ├── apis.md          # API reference and examples
@@ -41,15 +56,27 @@ A FastAPI-based AI support ticketing system with Supabase integration.
    ```
 
 3. **Setup database:**
-   - Run `database_schema.sql` in your Supabase SQL Editor
-   - Or use `clean_database.sql` to wipe everything clean
+   - First, run the original `database_schema.sql` in your Supabase SQL Editor (if not already done)
+   - Then run `migrations/001_add_users_and_auth.sql` in your Supabase SQL Editor
+     - Go to Supabase Dashboard → SQL Editor → New Query
+     - Copy and paste the entire migration file content
+     - Click "Run" to execute
+   - See `migrations/README.md` for detailed instructions
 
 4. **Start the server:**
    ```bash
    python -m uvicorn main:app --reload
    ```
 
-5. **View docs:**
+5. **Start the frontend (optional):**
+   ```bash
+   cd frontend
+   npm install
+   npm run dev
+   ```
+   The React frontend will be available at `http://localhost:5173`
+
+6. **View docs:**
    - Local docs: open `docs/index.md` in a Markdown viewer
    - Swagger UI: `http://localhost:8000/docs`
    - Redoc: `http://localhost:8000/redoc`
@@ -75,10 +102,23 @@ A FastAPI-based AI support ticketing system with Supabase integration.
 
 ## Features
 
+**Backend:**
 - ✅ AI-powered customer support
 - ✅ Ticket threading and history
 - ✅ Human agent handoff
 - ✅ Admin-protected actions (assign/close) via token header
 - ✅ Guardrails: per-ticket AI rate limit, profanity/PII redaction, retry/backoff
 - ✅ Real-time Supabase integration
+- ✅ Comprehensive test suite (unit + integration tests)
+- ✅ Structured logging and error handling
+- ✅ Type-safe configuration management
+
+**Frontend:**
+- ✅ Modern React application with Vite
+- ✅ Tailwind CSS for styling
+- ✅ Ticket management with filtering
+- ✅ Real-time message threading
+- ✅ Admin panel for agent assignment and ticket closure
+- ✅ Loading states and error handling
+- ✅ Responsive design
 
