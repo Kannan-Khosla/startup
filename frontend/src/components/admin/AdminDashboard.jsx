@@ -23,28 +23,55 @@ export default function AdminDashboard() {
   const navigate = useNavigate();
   const [tickets, setTickets] = useState([]);
   const [assignedTickets, setAssignedTickets] = useState([]);
+  const [pagination, setPagination] = useState(null);
+  const [assignedPagination, setAssignedPagination] = useState(null);
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
-  const [view, setView] = useState('all'); // 'all', 'assigned', 'unassigned'
+  const [contextFilter, setContextFilter] = useState('');
+  const [assignedToFilter, setAssignedToFilter] = useState('');
+  const [dateFrom, setDateFrom] = useState('');
+  const [dateTo, setDateTo] = useState('');
+  const [showFilters, setShowFilters] = useState(false);
+  const [view, setView] = useState('all'); // 'all', 'assigned'
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
+
+  useEffect(() => {
+    setPage(1); // Reset to page 1 when filters or view changes
+  }, [statusFilter, contextFilter, assignedToFilter, dateFrom, dateTo, searchQuery, view]);
 
   useEffect(() => {
     loadData();
-  }, [statusFilter, view]);
+  }, [statusFilter, contextFilter, assignedToFilter, dateFrom, dateTo, searchQuery, view, page, pageSize]);
 
   const loadData = async () => {
     setLoading(true);
     
+    const filters = {
+      ...(searchQuery && { search: searchQuery }),
+      ...(statusFilter && { status: statusFilter }),
+      ...(contextFilter && { context: contextFilter }),
+      ...(assignedToFilter && { assigned_to: assignedToFilter }),
+      ...(dateFrom && { date_from: dateFrom }),
+      ...(dateTo && { date_to: dateTo }),
+      page,
+      page_size: pageSize,
+    };
+    
     // Load all tickets
-    const { data: allTickets } = await listTickets(statusFilter || undefined);
+    const { data: allTickets } = await listTickets(filters);
     if (allTickets) {
       setTickets(allTickets.tickets || []);
+      setPagination(allTickets.pagination || null);
     }
 
     // Load assigned tickets
-    const { data: assigned } = await getAssignedTickets();
+    const { data: assigned } = await getAssignedTickets(filters);
     if (assigned) {
       setAssignedTickets(assigned.tickets || []);
+      setAssignedPagination(assigned.pagination || null);
     }
 
     // Load stats
@@ -56,7 +83,18 @@ export default function AdminDashboard() {
     setLoading(false);
   };
 
+  const clearFilters = () => {
+    setSearchQuery('');
+    setStatusFilter('');
+    setContextFilter('');
+    setAssignedToFilter('');
+    setDateFrom('');
+    setDateTo('');
+    setPage(1);
+  };
+
   const displayTickets = view === 'assigned' ? assignedTickets : tickets;
+  const displayPagination = view === 'assigned' ? assignedPagination : pagination;
 
   return (
     <div className="min-h-screen bg-gray-900 text-white">
@@ -100,7 +138,19 @@ export default function AdminDashboard() {
             </div>
           )}
 
-          {/* Filters */}
+          {/* Search */}
+          <div className="mb-6">
+            <h3 className="text-sm font-semibold text-gray-400 mb-3 uppercase tracking-wide">Search</h3>
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search tickets..."
+              className="w-full px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-orange-500"
+            />
+          </div>
+
+          {/* View */}
           <div className="mb-6">
             <h3 className="text-sm font-semibold text-gray-400 mb-3 uppercase tracking-wide">View</h3>
             <div className="space-y-2">
@@ -127,18 +177,94 @@ export default function AdminDashboard() {
             </div>
           </div>
 
+          {/* Filters */}
           <div className="mb-6">
-            <h3 className="text-sm font-semibold text-gray-400 mb-3 uppercase tracking-wide">Filter</h3>
-            <select
-              value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value)}
-              className="w-full px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-orange-500"
-            >
-              <option value="">All Statuses</option>
-              <option value="open">Open</option>
-              <option value="human_assigned">Assigned</option>
-              <option value="closed">Closed</option>
-            </select>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wide">Filters</h3>
+              <button
+                onClick={() => setShowFilters(!showFilters)}
+                className="text-xs text-orange-400 hover:text-orange-300"
+              >
+                {showFilters ? 'Hide' : 'Show'}
+              </button>
+            </div>
+            
+            {showFilters && (
+              <div className="space-y-3">
+                <select
+                  value={statusFilter}
+                  onChange={(e) => setStatusFilter(e.target.value)}
+                  className="w-full px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-orange-500"
+                >
+                  <option value="">All Statuses</option>
+                  <option value="open">Open</option>
+                  <option value="human_assigned">Assigned</option>
+                  <option value="closed">Closed</option>
+                </select>
+                
+                <input
+                  type="text"
+                  value={contextFilter}
+                  onChange={(e) => setContextFilter(e.target.value)}
+                  placeholder="Context/Brand"
+                  className="w-full px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-orange-500"
+                />
+                
+                {view === 'all' && (
+                  <input
+                    type="text"
+                    value={assignedToFilter}
+                    onChange={(e) => setAssignedToFilter(e.target.value)}
+                    placeholder="Assigned to (email)"
+                    className="w-full px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-orange-500"
+                  />
+                )}
+                
+                <div className="space-y-2">
+                  <label className="text-xs text-gray-400">Date From</label>
+                  <input
+                    type="date"
+                    value={dateFrom}
+                    onChange={(e) => setDateFrom(e.target.value)}
+                    className="w-full px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-orange-500"
+                  />
+                </div>
+                
+                <div className="space-y-2">
+                  <label className="text-xs text-gray-400">Date To</label>
+                  <input
+                    type="date"
+                    value={dateTo}
+                    onChange={(e) => setDateTo(e.target.value)}
+                    className="w-full px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-orange-500"
+                  />
+                </div>
+                
+                <div className="space-y-2">
+                  <label className="text-xs text-gray-400">Items per page</label>
+                  <select
+                    value={pageSize}
+                    onChange={(e) => {
+                      setPageSize(Number(e.target.value));
+                      setPage(1);
+                    }}
+                    className="w-full px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-orange-500"
+                  >
+                    <option value={5}>5</option>
+                    <option value={10}>10</option>
+                    <option value={20}>20</option>
+                    <option value={50}>50</option>
+                  </select>
+                </div>
+                
+                <button
+                  onClick={clearFilters}
+                  className="w-full px-4 py-2 bg-gray-700 text-gray-300 rounded-lg hover:bg-gray-600 transition-colors text-sm"
+                >
+                  Clear Filters
+                </button>
+              </div>
+            )}
           </div>
 
           <button
@@ -151,11 +277,18 @@ export default function AdminDashboard() {
 
         {/* Main Content */}
         <main className="flex-1 p-6 overflow-y-auto">
-          <div className="mb-6">
-            <h2 className="text-xl font-semibold text-white mb-2">
-              {view === 'assigned' ? 'My Assigned Tickets' : 'All Tickets'}
-            </h2>
-            <p className="text-sm text-gray-400">Manage and respond to support tickets</p>
+          <div className="mb-6 flex items-center justify-between">
+            <div>
+              <h2 className="text-xl font-semibold text-white mb-2">
+                {view === 'assigned' ? 'My Assigned Tickets' : 'All Tickets'}
+              </h2>
+              <p className="text-sm text-gray-400">Manage and respond to support tickets</p>
+            </div>
+            {displayPagination && (
+              <div className="text-sm text-gray-400">
+                Showing {displayTickets.length > 0 ? (page - 1) * pageSize + 1 : 0} - {Math.min(page * pageSize, displayPagination.total_count)} of {displayPagination.total_count} tickets
+              </div>
+            )}
           </div>
 
           {loading ? (
@@ -189,6 +322,54 @@ export default function AdminDashboard() {
                   </p>
                 </div>
               ))}
+            </div>
+          )}
+
+          {/* Pagination */}
+          {displayPagination && displayPagination.total_pages > 0 && (
+            <div className="mt-6 flex items-center justify-center gap-2">
+              <button
+                onClick={() => setPage(p => Math.max(1, p - 1))}
+                disabled={!displayPagination.has_prev || loading}
+                className="px-4 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                Previous
+              </button>
+              <div className="flex items-center gap-2">
+                {Array.from({ length: Math.min(5, displayPagination.total_pages) }, (_, i) => {
+                  let pageNum;
+                  if (displayPagination.total_pages <= 5) {
+                    pageNum = i + 1;
+                  } else if (displayPagination.page <= 3) {
+                    pageNum = i + 1;
+                  } else if (displayPagination.page >= displayPagination.total_pages - 2) {
+                    pageNum = displayPagination.total_pages - 4 + i;
+                  } else {
+                    pageNum = displayPagination.page - 2 + i;
+                  }
+                  return (
+                    <button
+                      key={pageNum}
+                      onClick={() => setPage(pageNum)}
+                      disabled={loading}
+                      className={`px-4 py-2 rounded-lg transition-colors ${
+                        pageNum === displayPagination.page
+                          ? 'bg-orange-500 text-white'
+                          : 'bg-gray-800 border border-gray-700 text-white hover:bg-gray-700'
+                      } disabled:opacity-50 disabled:cursor-not-allowed`}
+                    >
+                      {pageNum}
+                    </button>
+                  );
+                })}
+              </div>
+              <button
+                onClick={() => setPage(p => Math.min(displayPagination.total_pages, p + 1))}
+                disabled={!displayPagination.has_next || loading}
+                className="px-4 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                Next
+              </button>
             </div>
           )}
         </main>

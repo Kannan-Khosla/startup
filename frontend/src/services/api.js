@@ -69,10 +69,21 @@ async function apiRequest(url, options = {}) {
 }
 
 /**
- * List all tickets
+ * List all tickets (admin) with search, filters, and pagination
  */
-export async function listTickets(status = '') {
-  const url = `/admin/tickets${status ? `?status=${encodeURIComponent(status)}` : ''}`;
+export async function listTickets(filters = {}) {
+  const params = new URLSearchParams();
+  if (filters.search) params.append('search', filters.search);
+  if (filters.status) params.append('status', filters.status);
+  if (filters.context) params.append('context', filters.context);
+  if (filters.assigned_to) params.append('assigned_to', filters.assigned_to);
+  if (filters.date_from) params.append('date_from', filters.date_from);
+  if (filters.date_to) params.append('date_to', filters.date_to);
+  if (filters.page) params.append('page', filters.page);
+  if (filters.page_size) params.append('page_size', filters.page_size);
+  
+  const queryString = params.toString();
+  const url = `/admin/tickets${queryString ? `?${queryString}` : ''}`;
   return apiRequest(url);
 }
 
@@ -94,10 +105,21 @@ export async function createTicket(context, subject, message) {
 }
 
 /**
- * Get customer tickets
+ * Get customer tickets with search, filters, and pagination
  */
-export async function getCustomerTickets() {
-  return apiRequest('/customer/tickets');
+export async function getCustomerTickets(filters = {}) {
+  const params = new URLSearchParams();
+  if (filters.search) params.append('search', filters.search);
+  if (filters.status) params.append('status', filters.status);
+  if (filters.context) params.append('context', filters.context);
+  if (filters.date_from) params.append('date_from', filters.date_from);
+  if (filters.date_to) params.append('date_to', filters.date_to);
+  if (filters.page) params.append('page', filters.page);
+  if (filters.page_size) params.append('page_size', filters.page_size);
+  
+  const queryString = params.toString();
+  const url = `/customer/tickets${queryString ? `?${queryString}` : ''}`;
+  return apiRequest(url);
 }
 
 /**
@@ -141,10 +163,21 @@ export async function assignTicketToAdmin(ticketId, adminEmail) {
 }
 
 /**
- * Get assigned tickets for admin
+ * Get assigned tickets for admin with search, filters, and pagination
  */
-export async function getAssignedTickets() {
-  return apiRequest('/admin/tickets/assigned');
+export async function getAssignedTickets(filters = {}) {
+  const params = new URLSearchParams();
+  if (filters.search) params.append('search', filters.search);
+  if (filters.status) params.append('status', filters.status);
+  if (filters.context) params.append('context', filters.context);
+  if (filters.date_from) params.append('date_from', filters.date_from);
+  if (filters.date_to) params.append('date_to', filters.date_to);
+  if (filters.page) params.append('page', filters.page);
+  if (filters.page_size) params.append('page_size', filters.page_size);
+  
+  const queryString = params.toString();
+  const url = `/admin/tickets/assigned${queryString ? `?${queryString}` : ''}`;
+  return apiRequest(url);
 }
 
 /**

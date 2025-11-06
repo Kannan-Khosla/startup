@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     # JWT configuration
     jwt_secret_key: str = Field(default="your-secret-key-change-in-production", description="JWT secret key for token signing")
     jwt_token_expire_hours: int = Field(default=24, description="JWT token expiration time in hours")
+    
+    # Admin bootstrap configuration
+    admin_bootstrap_key: Optional[str] = Field(default=None, description="Bootstrap key for creating first admin (only used when no admins exist)")
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -1,8 +1,9 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi import Header, HTTPException, status, Depends
+from fastapi import Header, HTTPException, status, Depends, Query
 from fastapi.exceptions import RequestValidationError
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from typing import Optional
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from pydantic import BaseModel, EmailStr
 from openai import OpenAI
@@ -45,6 +46,7 @@ app.add_middleware(
 
 # HTTP Bearer token security
 security = HTTPBearer()
+security_optional = HTTPBearer(auto_error=False)
 
 
 # ---------------------------
@@ -56,6 +58,7 @@ class TicketRequest(BaseModel):
     context: str
     subject: str
     message: str
+    priority: str = "medium"  # low, medium, high, urgent
 
 
 class MessageRequest(BaseModel):
@@ -94,6 +97,29 @@ class AdminReplyRequest(BaseModel):
 
 class AssignAdminRequest(BaseModel):
     admin_email: str
+
+
+class SLADefinitionRequest(BaseModel):
+    name: str
+    description: str | None = None
+    priority: str  # low, medium, high, urgent
+    response_time_minutes: int
+    resolution_time_minutes: int
+    business_hours_only: bool = False
+    business_hours_start: str | None = None  # HH:MM format
+    business_hours_end: str | None = None  # HH:MM format
+    business_days: list[int] | None = None  # [1-7] where 1=Monday, 7=Sunday
+
+
+class UpdatePriorityRequest(BaseModel):
+    priority: str  # low, medium, high, urgent
+
+
+class TimeEntryRequest(BaseModel):
+    duration_minutes: int
+    description: str | None = None
+    entry_type: str = "work"  # work, waiting, research, communication, other
+    billable: bool = True
 
 
 # ---------------------------
@@ -155,6 +181,25 @@ def get_current_admin(current_user: dict = Depends(get_current_user)) -> dict:
             detail="Admin access required",
         )
     return current_user
+
+
+def get_current_admin_optional(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_optional)) -> dict | None:
+    """Try to get current admin, return None if not authenticated."""
+    try:
+        if credentials is None:
+            return None
+        token = credentials.credentials
+        payload = decode_access_token(token)
+        if payload is None:
+            return None
+        user_id = payload.get("sub")
+        email = payload.get("email")
+        role = payload.get("role")
+        if not user_id or not email or role != "admin":
+            return None
+        return {"id": user_id, "email": email, "role": role}
+    except Exception:
+        return None
 
 
 # ---------------------------
@@ -345,15 +390,51 @@ def get_current_user_info(current_user: dict = Depends(get_current_user)):
 
 @app.post("/auth/admin/register", response_model=Token)
 def register_admin(
-    user_data: UserRegister, current_admin: dict = Depends(get_current_admin)
+    user_data: UserRegister,
+    bootstrap_key: str = Query(default=None),
+    current_admin: dict | None = Depends(get_current_admin_optional),
 ):
-    """Register a new admin account (admin only)."""
+    """
+    Register a new admin account.
+    
+    Two ways to use this:
+    1. If no admins exist yet: Use bootstrap_key from ADMIN_BOOTSTRAP_KEY env var (optional)
+    2. If admins exist: Must be logged in as admin (JWT token required)
+    """
     try:
         if supabase is None:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Database not configured",
             )
+        
+        # Check if any admins exist
+        admin_count = (
+            supabase.table("users")
+            .select("id", count="exact")
+            .eq("role", "admin")
+            .execute()
+            .count
+        )
+        
+        # Bootstrap mode: No admins exist yet
+        if admin_count == 0:
+            # Check bootstrap key if provided
+            bootstrap_key_env = getattr(settings, "admin_bootstrap_key", None)
+            if bootstrap_key_env:
+                if bootstrap_key != bootstrap_key_env:
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="Bootstrap key required for first admin. Set ADMIN_BOOTSTRAP_KEY in .env",
+                    )
+            logger.info("Bootstrap mode: Creating first admin account")
+        else:
+            # Normal mode: Require admin authentication
+            if current_admin is None:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Admin authentication required. Login as admin first or use bootstrap key if no admins exist.",
+                )
         
         # Check if user already exists
         existing = (
@@ -403,7 +484,10 @@ def register_admin(
             data={"sub": user_id, "email": user["email"], "role": user["role"]}
         )
         
-        logger.info(f"New admin registered by {current_admin['email']}: {user['email']}")
+        if admin_count == 0:
+            logger.info(f"First admin created via bootstrap: {user['email']}")
+        else:
+            logger.info(f"New admin registered by {current_admin['email']}: {user['email']}")
         
         return {
             "access_token": access_token,
@@ -586,6 +670,7 @@ def create_or_continue_ticket(
             logger.info(f"Continuing existing ticket: {ticket_id}")
         else:
             # Create new ticket
+            priority = req.priority if hasattr(req, 'priority') and req.priority in ['low', 'medium', 'high', 'urgent'] else 'medium'
             new_ticket = (
                 supabase.table("tickets")
                 .insert(
@@ -593,7 +678,9 @@ def create_or_continue_ticket(
                         "context": req.context,
                         "subject": req.subject,
                         "status": "open",
+                        "priority": priority,
                         "user_id": user_id,
+                        "source": "web",
                         "created_at": datetime.utcnow().isoformat(),
                     }
                 )
@@ -1110,9 +1197,24 @@ def get_stats():
 # ---------------------------------------------------
 @app.get("/admin/tickets")
 def admin_get_all_tickets(
-    status: str = None, current_admin: dict = Depends(get_current_admin)
+    search: str = Query(default=None, description="Search in subject and message content"),
+    status: str = Query(default=None, description="Filter by status (open, human_assigned, closed)"),
+    context: str = Query(default=None, description="Filter by context/brand"),
+    assigned_to: str = Query(default=None, description="Filter by assigned agent email"),
+    date_from: str = Query(default=None, description="Filter from date (ISO format: YYYY-MM-DD)"),
+    date_to: str = Query(default=None, description="Filter to date (ISO format: YYYY-MM-DD)"),
+    page: int = Query(default=1, ge=1, description="Page number (1-indexed)"),
+    page_size: int = Query(default=10, ge=1, le=100, description="Number of items per page"),
+    current_admin: dict = Depends(get_current_admin)
 ):
-    """List all tickets, optionally filtered by `status`."""
+    """
+    List all tickets with advanced search, filter, and pagination options.
+    
+    Supports:
+    - Full-text search in subject and message content
+    - Filter by status, context, assigned agent, date range
+    - Pagination with page and page_size parameters
+    """
     try:
         if supabase is None:
             raise HTTPException(
@@ -1120,11 +1222,65 @@ def admin_get_all_tickets(
                 detail="Database not configured",
             )
         
-        query = supabase.table("tickets").select("*").order("updated_at", desc=True)
+        query = supabase.table("tickets").select("*", count="exact")
+        
+        # Apply filters
         if status:
             query = query.eq("status", status)
-        res = query.execute()
-        return {"tickets": res.data}
+        if context:
+            query = query.eq("context", context)
+        if assigned_to:
+            query = query.eq("assigned_to", assigned_to)
+        if date_from:
+            query = query.gte("created_at", f"{date_from}T00:00:00Z")
+        if date_to:
+            query = query.lte("created_at", f"{date_to}T23:59:59Z")
+        
+        # Get total count before pagination (for search we'll need to handle differently)
+        base_res = query.order("updated_at", desc=True).execute()
+        all_tickets = base_res.data
+        
+        # If search is provided, filter by subject and message content
+        if search:
+            filtered_tickets = []
+            search_lower = search.lower()
+            for ticket in all_tickets:
+                # Check if search matches subject
+                if search_lower in ticket.get("subject", "").lower():
+                    filtered_tickets.append(ticket)
+                    continue
+                
+                # Check if search matches any message in the ticket
+                messages_res = (
+                    supabase.table("messages")
+                    .select("message")
+                    .eq("ticket_id", ticket["id"])
+                    .execute()
+                )
+                for msg in messages_res.data:
+                    if search_lower in msg.get("message", "").lower():
+                        filtered_tickets.append(ticket)
+                        break
+            
+            all_tickets = filtered_tickets
+        
+        # Calculate pagination
+        total_count = len(all_tickets)
+        total_pages = (total_count + page_size - 1) // page_size if total_count > 0 else 0
+        skip = (page - 1) * page_size
+        tickets = all_tickets[skip:skip + page_size]
+        
+        return {
+            "tickets": tickets,
+            "pagination": {
+                "page": page,
+                "page_size": page_size,
+                "total_count": total_count,
+                "total_pages": total_pages,
+                "has_next": page < total_pages,
+                "has_prev": page > 1
+            }
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -1133,8 +1289,24 @@ def admin_get_all_tickets(
 
 
 @app.get("/admin/tickets/assigned")
-def get_assigned_tickets(current_admin: dict = Depends(get_current_admin)):
-    """Get tickets assigned to the current admin."""
+def get_assigned_tickets(
+    search: str = Query(default=None, description="Search in subject and message content"),
+    status: str = Query(default=None, description="Filter by status (open, human_assigned, closed)"),
+    context: str = Query(default=None, description="Filter by context/brand"),
+    date_from: str = Query(default=None, description="Filter from date (ISO format: YYYY-MM-DD)"),
+    date_to: str = Query(default=None, description="Filter to date (ISO format: YYYY-MM-DD)"),
+    page: int = Query(default=1, ge=1, description="Page number (1-indexed)"),
+    page_size: int = Query(default=10, ge=1, le=100, description="Number of items per page"),
+    current_admin: dict = Depends(get_current_admin)
+):
+    """
+    Get tickets assigned to the current admin with search, filter, and pagination options.
+    
+    Supports:
+    - Full-text search in subject and message content
+    - Filter by status, context, date range
+    - Pagination with page and page_size parameters
+    """
     try:
         if supabase is None:
             raise HTTPException(
@@ -1143,14 +1315,62 @@ def get_assigned_tickets(current_admin: dict = Depends(get_current_admin)):
             )
         
         admin_email = current_admin["email"]
-        res = (
-            supabase.table("tickets")
-            .select("*")
-            .eq("assigned_to", admin_email)
-            .order("updated_at", desc=True)
-            .execute()
-        )
-        return {"tickets": res.data}
+        query = supabase.table("tickets").select("*", count="exact").eq("assigned_to", admin_email)
+        
+        # Apply filters
+        if status:
+            query = query.eq("status", status)
+        if context:
+            query = query.eq("context", context)
+        if date_from:
+            query = query.gte("created_at", f"{date_from}T00:00:00Z")
+        if date_to:
+            query = query.lte("created_at", f"{date_to}T23:59:59Z")
+        
+        res = query.order("updated_at", desc=True).execute()
+        all_tickets = res.data
+        
+        # If search is provided, filter by subject and message content
+        if search:
+            filtered_tickets = []
+            search_lower = search.lower()
+            for ticket in all_tickets:
+                # Check if search matches subject
+                if search_lower in ticket.get("subject", "").lower():
+                    filtered_tickets.append(ticket)
+                    continue
+                
+                # Check if search matches any message in the ticket
+                messages_res = (
+                    supabase.table("messages")
+                    .select("message")
+                    .eq("ticket_id", ticket["id"])
+                    .execute()
+                )
+                for msg in messages_res.data:
+                    if search_lower in msg.get("message", "").lower():
+                        filtered_tickets.append(ticket)
+                        break
+            
+            all_tickets = filtered_tickets
+        
+        # Calculate pagination
+        total_count = len(all_tickets)
+        total_pages = (total_count + page_size - 1) // page_size if total_count > 0 else 0
+        skip = (page - 1) * page_size
+        tickets = all_tickets[skip:skip + page_size]
+        
+        return {
+            "tickets": tickets,
+            "pagination": {
+                "page": page,
+                "page_size": page_size,
+                "total_count": total_count,
+                "total_pages": total_pages,
+                "has_next": page < total_pages,
+                "has_prev": page > 1
+            }
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -1159,8 +1379,24 @@ def get_assigned_tickets(current_admin: dict = Depends(get_current_admin)):
 
 
 @app.get("/customer/tickets")
-def get_customer_tickets(current_user: dict = Depends(get_current_customer)):
-    """Get all tickets for the current customer."""
+def get_customer_tickets(
+    search: str = Query(default=None, description="Search in subject and message content"),
+    status: str = Query(default=None, description="Filter by status (open, human_assigned, closed)"),
+    context: str = Query(default=None, description="Filter by context/brand"),
+    date_from: str = Query(default=None, description="Filter from date (ISO format: YYYY-MM-DD)"),
+    date_to: str = Query(default=None, description="Filter to date (ISO format: YYYY-MM-DD)"),
+    page: int = Query(default=1, ge=1, description="Page number (1-indexed)"),
+    page_size: int = Query(default=10, ge=1, le=100, description="Number of items per page"),
+    current_user: dict = Depends(get_current_customer)
+):
+    """
+    Get all tickets for the current customer with search, filter, and pagination options.
+    
+    Supports:
+    - Full-text search in subject and message content
+    - Filter by status, context, date range
+    - Pagination with page and page_size parameters
+    """
     try:
         if supabase is None:
             raise HTTPException(
@@ -1169,14 +1405,62 @@ def get_customer_tickets(current_user: dict = Depends(get_current_customer)):
             )
         
         user_id = current_user["id"]
-        res = (
-            supabase.table("tickets")
-            .select("*")
-            .eq("user_id", user_id)
-            .order("updated_at", desc=True)
-            .execute()
-        )
-        return {"tickets": res.data}
+        query = supabase.table("tickets").select("*", count="exact").eq("user_id", user_id)
+        
+        # Apply filters
+        if status:
+            query = query.eq("status", status)
+        if context:
+            query = query.eq("context", context)
+        if date_from:
+            query = query.gte("created_at", f"{date_from}T00:00:00Z")
+        if date_to:
+            query = query.lte("created_at", f"{date_to}T23:59:59Z")
+        
+        res = query.order("updated_at", desc=True).execute()
+        all_tickets = res.data
+        
+        # If search is provided, filter by subject and message content
+        if search:
+            filtered_tickets = []
+            search_lower = search.lower()
+            for ticket in all_tickets:
+                # Check if search matches subject
+                if search_lower in ticket.get("subject", "").lower():
+                    filtered_tickets.append(ticket)
+                    continue
+                
+                # Check if search matches any message in the ticket
+                messages_res = (
+                    supabase.table("messages")
+                    .select("message")
+                    .eq("ticket_id", ticket["id"])
+                    .execute()
+                )
+                for msg in messages_res.data:
+                    if search_lower in msg.get("message", "").lower():
+                        filtered_tickets.append(ticket)
+                        break
+            
+            all_tickets = filtered_tickets
+        
+        # Calculate pagination
+        total_count = len(all_tickets)
+        total_pages = (total_count + page_size - 1) // page_size if total_count > 0 else 0
+        skip = (page - 1) * page_size
+        tickets = all_tickets[skip:skip + page_size]
+        
+        return {
+            "tickets": tickets,
+            "pagination": {
+                "page": page,
+                "page_size": page_size,
+                "total_count": total_count,
+                "total_pages": total_pages,
+                "has_next": page < total_pages,
+                "has_prev": page > 1
+            }
+        }
     except HTTPException:
         raise
     except Exception as e:
