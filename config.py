@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     openai_api_key: str = Field(..., description="OpenAI API key")
     supabase_url: str = Field(..., description="Supabase project URL")
     supabase_key: str = Field(..., description="Supabase anon key")
+    supabase_service_role_key: Optional[str] = Field(default=None, description="Supabase service role key (for storage operations)")
 
     # Optional settings with defaults
     admin_token: Optional[str] = Field(default=None, description="Admin token for protected endpoints")

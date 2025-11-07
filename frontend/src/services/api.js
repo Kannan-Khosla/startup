@@ -222,3 +222,112 @@ export async function getStats() {
   return apiRequest('/stats');
 }
 
+/**
+ * Upload attachment to ticket
+ */
+export async function uploadAttachment(ticketId, file, messageId = null) {
+  const baseUrl = getBaseUrl().replace(/\/+$/, '');
+  const fullUrl = `${baseUrl}/ticket/${encodeURIComponent(ticketId)}/attachments`;
+  const token = getToken();
+  
+  const formData = new FormData();
+  formData.append('file', file);
+  if (messageId) {
+    formData.append('message_id', messageId);
+  }
+  
+  try {
+    const response = await fetch(fullUrl, {
+      method: 'POST',
+      headers: {
+        ...(token && { Authorization: `Bearer ${token}` }),
+      },
+      body: formData,
+    });
+    
+    const data = await response.json();
+    
+    if (!response.ok) {
+      if (response.status === 401) {
+        throw new Error('Authentication required. Please login.');
+      }
+      throw new Error(data.detail || data.error || `HTTP ${response.status}`);
+    }
+    
+    return { data, error: null };
+  } catch (error) {
+    return { data: null, error: error.message || 'Upload failed' };
+  }
+}
+
+/**
+ * List attachments for a ticket
+ */
+export async function listAttachments(ticketId, messageId = null) {
+  const params = new URLSearchParams();
+  if (messageId) params.append('message_id', messageId);
+  
+  const queryString = params.toString();
+  const url = `/ticket/${encodeURIComponent(ticketId)}/attachments${queryString ? `?${queryString}` : ''}`;
+  return apiRequest(url);
+}
+
+/**
+ * Download attachment
+ */
+export async function downloadAttachment(attachmentId) {
+  const baseUrl = getBaseUrl().replace(/\/+$/, '');
+  const fullUrl = `${baseUrl}/attachment/${encodeURIComponent(attachmentId)}`;
+  const token = getToken();
+  
+  try {
+    const response = await fetch(fullUrl, {
+      method: 'GET',
+      headers: {
+        ...(token && { Authorization: `Bearer ${token}` }),
+      },
+    });
+    
+    if (!response.ok) {
+      if (response.status === 401) {
+        throw new Error('Authentication required. Please login.');
+      }
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || errorData.error || `HTTP ${response.status}`);
+    }
+    
+    // Get filename from Content-Disposition header
+    const contentDisposition = response.headers.get('Content-Disposition');
+    let filename = `attachment-${attachmentId}`;
+    if (contentDisposition) {
+      const filenameMatch = contentDisposition.match(/filename="?(.+)"?/);
+      if (filenameMatch) {
+        filename = filenameMatch[1];
+      }
+    }
+    
+    const blob = await response.blob();
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    window.URL.revokeObjectURL(url);
+    document.body.removeChild(a);
+    
+    return { data: { success: true }, error: null };
+  } catch (error) {
+    return { data: null, error: error.message || 'Download failed' };
+  }
+}
+
+/**
+ * Delete attachment
+ */
+export async function deleteAttachment(attachmentId) {
+  return apiRequest(`/attachment/${encodeURIComponent(attachmentId)}`, {
+    method: 'DELETE',
+  });
+}
+

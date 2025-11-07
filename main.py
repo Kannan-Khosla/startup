@@ -1,13 +1,14 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import Header, HTTPException, status, Depends, Query
 from fastapi.exceptions import RequestValidationError
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.responses import StreamingResponse, Response
 from typing import Optional
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from pydantic import BaseModel, EmailStr
 from openai import OpenAI
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from supabase_config import supabase
 from config import settings
 from logger import setup_logger
@@ -18,8 +19,10 @@ from auth import (
     create_access_token,
     decode_access_token,
 )
+from storage import upload_file, download_file, delete_file, list_attachments
 import re
 import time
+import io
 
 # Set up logging
 logger = setup_logger(__name__)
@@ -671,6 +674,24 @@ def create_or_continue_ticket(
         else:
             # Create new ticket
             priority = req.priority if hasattr(req, 'priority') and req.priority in ['low', 'medium', 'high', 'urgent'] else 'medium'
+            
+            # Auto-assign SLA based on priority
+            sla_id = None
+            try:
+                sla_res = (
+                    supabase.table("sla_definitions")
+                    .select("id")
+                    .eq("priority", priority)
+                    .eq("is_active", True)
+                    .order("created_at", desc=True)
+                    .limit(1)
+                    .execute()
+                )
+                if sla_res.data:
+                    sla_id = sla_res.data[0]["id"]
+            except Exception as e:
+                logger.warning(f"Could not auto-assign SLA for priority {priority}: {e}")
+            
             new_ticket = (
                 supabase.table("tickets")
                 .insert(
@@ -679,6 +700,7 @@ def create_or_continue_ticket(
                         "subject": req.subject,
                         "status": "open",
                         "priority": priority,
+                        "sla_id": sla_id,
                         "user_id": user_id,
                         "source": "web",
                         "created_at": datetime.utcnow().isoformat(),
@@ -1598,10 +1620,34 @@ def update_ticket_priority(
         
         old_priority = ticket_res.data[0].get("priority", "medium")
         
-        # Update priority
+        # Auto-assign SLA based on new priority
+        sla_id = None
+        try:
+            sla_res = (
+                supabase.table("sla_definitions")
+                .select("id")
+                .eq("priority", req.priority)
+                .eq("is_active", True)
+                .order("created_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            if sla_res.data:
+                sla_id = sla_res.data[0]["id"]
+        except Exception as e:
+            logger.warning(f"Could not auto-assign SLA for priority {req.priority}: {e}")
+        
+        # Update priority and SLA
+        update_dict = {
+            "priority": req.priority,
+            "updated_at": datetime.utcnow().isoformat()
+        }
+        if sla_id:
+            update_dict["sla_id"] = sla_id
+        
         result = (
             supabase.table("tickets")
-            .update({"priority": req.priority, "updated_at": datetime.utcnow().isoformat()})
+            .update(update_dict)
             .eq("id", ticket_id)
             .execute()
         )
@@ -1616,8 +1662,8 @@ def update_ticket_priority(
                 "new_value": req.priority,
                 "created_at": datetime.utcnow().isoformat()
             }).execute()
-        except Exception:
-            pass  # Activity log is optional
+        except Exception as e:
+            logger.warning(f"Could not log activity: {e}")  # Activity log is optional
         
         logger.info(f"Updated ticket {ticket_id} priority from {old_priority} to {req.priority}")
         return {"ticket": result.data[0]}
@@ -1705,8 +1751,28 @@ def get_ticket_sla_status(
             }
         
         # Calculate SLA times
-        created_at = datetime.fromisoformat(ticket["created_at"].replace('Z', '+00:00'))
-        now = datetime.utcnow()
+        # Handle datetime parsing with timezone (Supabase may return datetime objects or strings)
+        created_at_val = ticket["created_at"]
+        if isinstance(created_at_val, datetime):
+            created_at = created_at_val
+        elif isinstance(created_at_val, str):
+            if created_at_val.endswith('Z'):
+                created_at_val = created_at_val.replace('Z', '+00:00')
+            elif '+' not in created_at_val and 'Z' not in created_at_val:
+                created_at_val = created_at_val + '+00:00'
+            created_at = datetime.fromisoformat(created_at_val)
+        else:
+            # Fallback: try to parse as ISO format
+            created_at_str = str(created_at_val)
+            if created_at_str.endswith('Z'):
+                created_at_str = created_at_str.replace('Z', '+00:00')
+            elif '+' not in created_at_str and 'Z' not in created_at_str:
+                created_at_str = created_at_str + '+00:00'
+            created_at = datetime.fromisoformat(created_at_str)
+        # Ensure created_at is timezone-aware
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
         
         response_time_minutes = sla_definition["response_time_minutes"]
         resolution_time_minutes = sla_definition["resolution_time_minutes"]
@@ -1723,7 +1789,25 @@ def get_ticket_sla_status(
         resolution_violation = None
         
         if first_response_at:
-            first_response_dt = datetime.fromisoformat(first_response_at.replace('Z', '+00:00'))
+            if isinstance(first_response_at, datetime):
+                first_response_dt = first_response_at
+            elif isinstance(first_response_at, str):
+                first_response_str = first_response_at
+                if first_response_str.endswith('Z'):
+                    first_response_str = first_response_str.replace('Z', '+00:00')
+                elif '+' not in first_response_str and 'Z' not in first_response_str:
+                    first_response_str = first_response_str + '+00:00'
+                first_response_dt = datetime.fromisoformat(first_response_str)
+            else:
+                first_response_str = str(first_response_at)
+                if first_response_str.endswith('Z'):
+                    first_response_str = first_response_str.replace('Z', '+00:00')
+                elif '+' not in first_response_str and 'Z' not in first_response_str:
+                    first_response_str = first_response_str + '+00:00'
+                first_response_dt = datetime.fromisoformat(first_response_str)
+            # Ensure first_response_dt is timezone-aware
+            if first_response_dt.tzinfo is None:
+                first_response_dt = first_response_dt.replace(tzinfo=timezone.utc)
             if first_response_dt > first_response_time:
                 response_violation = {
                     "violated": True,
@@ -1741,7 +1825,25 @@ def get_ticket_sla_status(
                 }
         
         if resolved_at:
-            resolved_dt = datetime.fromisoformat(resolved_at.replace('Z', '+00:00'))
+            if isinstance(resolved_at, datetime):
+                resolved_dt = resolved_at
+            elif isinstance(resolved_at, str):
+                resolved_str = resolved_at
+                if resolved_str.endswith('Z'):
+                    resolved_str = resolved_str.replace('Z', '+00:00')
+                elif '+' not in resolved_str and 'Z' not in resolved_str:
+                    resolved_str = resolved_str + '+00:00'
+                resolved_dt = datetime.fromisoformat(resolved_str)
+            else:
+                resolved_str = str(resolved_at)
+                if resolved_str.endswith('Z'):
+                    resolved_str = resolved_str.replace('Z', '+00:00')
+                elif '+' not in resolved_str and 'Z' not in resolved_str:
+                    resolved_str = resolved_str + '+00:00'
+                resolved_dt = datetime.fromisoformat(resolved_str)
+            # Ensure resolved_dt is timezone-aware
+            if resolved_dt.tzinfo is None:
+                resolved_dt = resolved_dt.replace(tzinfo=timezone.utc)
             if resolved_dt > resolution_time:
                 resolution_violation = {
                     "violated": True,
@@ -1783,7 +1885,12 @@ def get_ticket_sla_status(
         raise
     except Exception as e:
         logger.error(f"Error in get_ticket_sla_status: {e}", exc_info=True)
-        raise
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get SLA status: {str(e)}",
+        )
 
 
 @app.post("/ticket/{ticket_id}/time-entry")
@@ -1998,19 +2105,21 @@ def admin_reply_to_ticket(
             update_data["status"] = "human_assigned"
             update_data["assigned_to"] = current_admin["email"]
         
-        supabase.table("tickets").update(update_data).eq("id", ticket_id).execute()
+        result = supabase.table("tickets").update(update_data).eq("id", ticket_id).execute()
         
         logger.info(f"Admin {current_admin['email']} replied to ticket {ticket_id}")
         
-        return {"success": True, "message": "Reply sent"}
+        return {"success": True, "message": "Reply sent", "ticket": result.data[0] if result.data else None}
     
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Error in admin_reply_to_ticket: {e}", exc_info=True)
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to send reply",
+            detail=f"Failed to send reply: {str(e)}",
         )
 
 
@@ -2138,3 +2247,321 @@ def close_ticket(
     except Exception as e:
         logger.error(f"Error in close_ticket: {e}", exc_info=True)
         raise
+
+
+# ---------------------------
+# 📎 ATTACHMENT ENDPOINTS
+# ---------------------------
+
+@app.post("/ticket/{ticket_id}/attachments")
+def upload_attachment(
+    ticket_id: str,
+    file: UploadFile = File(...),
+    message_id: Optional[str] = Form(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Upload an attachment to a ticket."""
+    try:
+        if supabase is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not configured",
+            )
+        
+        # Verify ticket exists and user has access
+        ticket_res = (
+            supabase.table("tickets")
+            .select("*")
+            .eq("id", ticket_id)
+            .limit(1)
+            .execute()
+        )
+        if not ticket_res.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Ticket not found",
+            )
+        
+        ticket = ticket_res.data[0]
+        user_id = current_user["id"]
+        user_role = current_user["role"]
+        
+        # Verify access (customer can only upload to their own tickets)
+        if user_role == "customer" and ticket.get("user_id") != user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You don't have access to this ticket",
+            )
+        
+        # Verify message_id if provided
+        if message_id:
+            message_res = (
+                supabase.table("messages")
+                .select("id")
+                .eq("id", message_id)
+                .eq("ticket_id", ticket_id)
+                .limit(1)
+                .execute()
+            )
+            if not message_res.data:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Message not found",
+                )
+        
+        # Read file content
+        file_content = file.file.read()
+        file_name = file.filename
+        mime_type = file.content_type or "application/octet-stream"
+        
+        # Upload file
+        attachment = upload_file(
+            file_content=file_content,
+            file_name=file_name,
+            mime_type=mime_type,
+            ticket_id=ticket_id,
+            user_id=user_id,
+            message_id=message_id,
+        )
+        
+        logger.info(f"Attachment uploaded: {attachment['id']} by {current_user['email']}")
+        
+        return {
+            "success": True,
+            "attachment": attachment,
+        }
+        
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    except Exception as e:
+        logger.error(f"Error in upload_attachment: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to upload attachment",
+        )
+
+
+@app.get("/ticket/{ticket_id}/attachments")
+def list_ticket_attachments(
+    ticket_id: str,
+    message_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """List all attachments for a ticket."""
+    try:
+        if supabase is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not configured",
+            )
+        
+        # Verify ticket exists and user has access
+        ticket_res = (
+            supabase.table("tickets")
+            .select("*")
+            .eq("id", ticket_id)
+            .limit(1)
+            .execute()
+        )
+        if not ticket_res.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Ticket not found",
+            )
+        
+        ticket = ticket_res.data[0]
+        user_id = current_user["id"]
+        user_role = current_user["role"]
+        
+        # Verify access (customer can only view their own tickets)
+        if user_role == "customer" and ticket.get("user_id") != user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You don't have access to this ticket",
+            )
+        
+        # List attachments
+        attachments = list_attachments(ticket_id=ticket_id, message_id=message_id)
+        
+        return {
+            "attachments": attachments,
+            "count": len(attachments),
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in list_ticket_attachments: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to list attachments",
+        )
+
+
+@app.get("/attachment/{attachment_id}")
+def download_attachment(
+    attachment_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Download an attachment."""
+    try:
+        if supabase is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not configured",
+            )
+        
+        # Get attachment record
+        attachment_res = (
+            supabase.table("attachments")
+            .select("*")
+            .eq("id", attachment_id)
+            .limit(1)
+            .execute()
+        )
+        if not attachment_res.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Attachment not found",
+            )
+        
+        attachment = attachment_res.data[0]
+        ticket_id = attachment["ticket_id"]
+        
+        # Verify ticket exists and user has access
+        ticket_res = (
+            supabase.table("tickets")
+            .select("*")
+            .eq("id", ticket_id)
+            .limit(1)
+            .execute()
+        )
+        if not ticket_res.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Ticket not found",
+            )
+        
+        ticket = ticket_res.data[0]
+        user_id = current_user["id"]
+        user_role = current_user["role"]
+        
+        # Verify access (customer can only download from their own tickets)
+        if user_role == "customer" and ticket.get("user_id") != user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You don't have access to this attachment",
+            )
+        
+        # Download file
+        file_content, attachment_meta = download_file(attachment_id)
+        
+        # Return file as streaming response
+        return StreamingResponse(
+            io.BytesIO(file_content),
+            media_type=attachment_meta["mime_type"],
+            headers={
+                "Content-Disposition": f'attachment; filename="{attachment_meta["file_name"]}"',
+                "Content-Length": str(attachment_meta["file_size"]),
+            },
+        )
+        
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e),
+        )
+    except Exception as e:
+        logger.error(f"Error in download_attachment: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to download attachment",
+        )
+
+
+@app.delete("/attachment/{attachment_id}")
+def delete_attachment(
+    attachment_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Delete an attachment."""
+    try:
+        if supabase is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not configured",
+            )
+        
+        # Get attachment record
+        attachment_res = (
+            supabase.table("attachments")
+            .select("*")
+            .eq("id", attachment_id)
+            .limit(1)
+            .execute()
+        )
+        if not attachment_res.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Attachment not found",
+            )
+        
+        attachment = attachment_res.data[0]
+        ticket_id = attachment["ticket_id"]
+        uploaded_by = attachment["uploaded_by"]
+        user_id = current_user["id"]
+        user_role = current_user["role"]
+        
+        # Verify access:
+        # - Customer can only delete their own uploads
+        # - Admin can delete any attachment
+        if user_role == "customer" and uploaded_by != user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You can only delete your own attachments",
+            )
+        
+        # Verify ticket exists (for additional validation)
+        ticket_res = (
+            supabase.table("tickets")
+            .select("*")
+            .eq("id", ticket_id)
+            .limit(1)
+            .execute()
+        )
+        if not ticket_res.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Ticket not found",
+            )
+        
+        # Delete file
+        delete_file(attachment_id)
+        
+        logger.info(f"Attachment deleted: {attachment_id} by {current_user['email']}")
+        
+        return {
+            "success": True,
+            "message": "Attachment deleted successfully",
+        }
+        
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e),
+        )
+    except Exception as e:
+        logger.error(f"Error in delete_attachment: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete attachment",
+        )

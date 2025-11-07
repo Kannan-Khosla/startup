@@ -32,8 +32,8 @@ def test_endpoints():
     admin_login = requests.post(
         f"{BASE_URL}/auth/login",
         json={
-            "email": "admin@example.com",  # Change to your admin email
-            "password": "admin123"  # Change to your admin password
+            "email": "kannankhosla2405@gmail.com",  # Change to your admin email
+            "password": "Kannan@123"  # Change to your admin password
         }
     )
     
@@ -46,36 +46,41 @@ def test_endpoints():
     admin_headers = {"Authorization": f"Bearer {admin_token}"}
     print("✅ Admin login successful")
     
-    # Step 2: Create SLA Definition
-    print("\n2️⃣ Testing Create SLA Definition...")
-    sla_data = {
-        "name": "Standard Support SLA",
-        "description": "Standard 8-hour response, 48-hour resolution",
-        "priority": "medium",
-        "response_time_minutes": 480,  # 8 hours
-        "resolution_time_minutes": 2880,  # 48 hours
-        "business_hours_only": False
-    }
-    sla_response = requests.post(
-        f"{BASE_URL}/admin/slas",
-        json=sla_data,
-        headers={"Content-Type": "application/json", **admin_headers}
-    )
-    print_response("Create SLA Definition", sla_response)
+    # Step 2: Create SLA Definitions for all priorities
+    print("\n2️⃣ Testing Create SLA Definitions for all priorities...")
+    sla_priorities = [
+        {"priority": "low", "response_time_minutes": 1440, "resolution_time_minutes": 5760},  # 24h / 96h
+        {"priority": "medium", "response_time_minutes": 480, "resolution_time_minutes": 2880},  # 8h / 48h
+        {"priority": "high", "response_time_minutes": 240, "resolution_time_minutes": 1440},  # 4h / 24h
+        {"priority": "urgent", "response_time_minutes": 60, "resolution_time_minutes": 480},  # 1h / 8h
+    ]
     
-    if sla_response.status_code == 200:
-        sla_id = sla_response.json().get("sla", {}).get("id")
-        print(f"✅ SLA created with ID: {sla_id}")
-    else:
-        print("⚠️ SLA creation failed or already exists")
+    for sla_config in sla_priorities:
+        sla_data = {
+            "name": f"{sla_config['priority'].title()} Priority SLA",
+            "description": f"Standard SLA for {sla_config['priority']} priority tickets",
+            "priority": sla_config["priority"],
+            "response_time_minutes": sla_config["response_time_minutes"],
+            "resolution_time_minutes": sla_config["resolution_time_minutes"],
+            "business_hours_only": False
+        }
+        sla_response = requests.post(
+            f"{BASE_URL}/admin/slas",
+            json=sla_data,
+            headers={"Content-Type": "application/json", **admin_headers}
+        )
+        if sla_response.status_code == 200:
+            sla_id = sla_response.json().get("sla", {}).get("id")
+            print(f"✅ {sla_config['priority'].title()} SLA created with ID: {sla_id}")
+        else:
+            print(f"⚠️ {sla_config['priority'].title()} SLA creation failed (may already exist)")
     
-    # Step 3: List SLA Definitions
-    print("\n3️⃣ Testing List SLA Definitions...")
+    # List all SLAs
     list_slas = requests.get(
         f"{BASE_URL}/admin/slas?is_active=true",
         headers=admin_headers
     )
-    print_response("List SLA Definitions", list_slas)
+    print_response("List All SLA Definitions", list_slas)
     
     # Step 4: Login as customer (or create one)
     print("\n4️⃣ Testing Customer Login...")
