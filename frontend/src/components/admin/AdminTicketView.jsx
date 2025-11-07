@@ -5,6 +5,8 @@ import { getTicket, adminReply, assignTicketToAdmin, closeTicket, listTickets, l
 import Loading from '../Loading';
 import AttachmentList from '../AttachmentList';
 import FileUpload from '../FileUpload';
+import EmailComposer from '../EmailComposer';
+import EmailThread from '../EmailThread';
 
 function formatTimestamp(timestamp) {
   if (!timestamp) return '';
@@ -83,6 +85,8 @@ export default function AdminTicketView() {
   const [closing, setClosing] = useState(false);
   const [messageAttachments, setMessageAttachments] = useState({});
   const [ticketAttachments, setTicketAttachments] = useState([]);
+  const [showEmailComposer, setShowEmailComposer] = useState(false);
+  const [activeTab, setActiveTab] = useState('messages'); // 'messages' or 'emails'
   const messagesEndRef = useRef(null);
 
   useEffect(() => {
@@ -267,6 +271,30 @@ export default function AdminTicketView() {
         {/* Messages */}
         <main className="flex-1 overflow-y-auto p-6">
           <div className="max-w-4xl mx-auto">
+            {/* Tabs */}
+            <div className="flex gap-2 mb-6 border-b border-gray-700">
+              <button
+                onClick={() => setActiveTab('messages')}
+                className={`px-4 py-2 font-medium transition-colors ${
+                  activeTab === 'messages'
+                    ? 'text-orange-400 border-b-2 border-orange-400'
+                    : 'text-gray-400 hover:text-white'
+                }`}
+              >
+                💬 Messages
+              </button>
+              <button
+                onClick={() => setActiveTab('emails')}
+                className={`px-4 py-2 font-medium transition-colors ${
+                  activeTab === 'emails'
+                    ? 'text-orange-400 border-b-2 border-orange-400'
+                    : 'text-gray-400 hover:text-white'
+                }`}
+              >
+                📧 Emails
+              </button>
+            </div>
+
             {/* Show all ticket attachments (standalone attachments without message_id) */}
             {ticketAttachments.filter(att => !att.message_id).length > 0 && (
               <div className="mb-6 p-4 bg-gray-800/50 border border-gray-700 rounded-lg">
@@ -283,25 +311,51 @@ export default function AdminTicketView() {
               </div>
             )}
 
-            {messages.length === 0 ? (
-              <div className="text-center text-gray-400 py-12">
-                <p>No messages yet</p>
+            {/* Email Composer */}
+            {showEmailComposer && (
+              <div className="mb-6">
+                <EmailComposer
+                  ticketId={ticketId}
+                  initialSubject={ticket.subject ? `Re: ${ticket.subject}` : ''}
+                  onSent={async (data) => {
+                    setShowEmailComposer(false);
+                    await loadThread();
+                    setActiveTab('emails');
+                  }}
+                  onCancel={() => setShowEmailComposer(false)}
+                />
               </div>
-            ) : (
+            )}
+
+            {/* Messages Tab */}
+            {activeTab === 'messages' && (
               <>
-                {messages.map((msg, idx) => (
-                  <MessageBubble
-                    key={idx}
-                    message={msg}
-                    ticketId={ticketId}
-                    currentUserId={user?.id}
-                    userRole={user?.role || 'admin'}
-                    messageAttachments={messageAttachments}
-                    onAttachmentsChange={loadAttachments}
-                  />
-                ))}
-                <div ref={messagesEndRef} />
+                {messages.length === 0 ? (
+                  <div className="text-center text-gray-400 py-12">
+                    <p>No messages yet</p>
+                  </div>
+                ) : (
+                  <>
+                    {messages.map((msg, idx) => (
+                      <MessageBubble
+                        key={idx}
+                        message={msg}
+                        ticketId={ticketId}
+                        currentUserId={user?.id}
+                        userRole={user?.role || 'admin'}
+                        messageAttachments={messageAttachments}
+                        onAttachmentsChange={loadAttachments}
+                      />
+                    ))}
+                    <div ref={messagesEndRef} />
+                  </>
+                )}
               </>
+            )}
+
+            {/* Emails Tab */}
+            {activeTab === 'emails' && (
+              <EmailThread ticketId={ticketId} />
             )}
           </div>
         </main>
@@ -327,6 +381,19 @@ export default function AdminTicketView() {
                   <span className="ml-2 text-white">{new Date(ticket.created_at).toLocaleString()}</span>
                 </div>
               </div>
+            </div>
+          </div>
+
+          <div className="mb-6">
+            <h3 className="text-sm font-semibold text-gray-400 mb-3 uppercase tracking-wide">Email Actions</h3>
+            <div className="space-y-3">
+              <button
+                onClick={() => setShowEmailComposer(!showEmailComposer)}
+                disabled={ticket.status === 'closed'}
+                className="w-full px-4 py-2 bg-orange-500 text-white rounded-lg hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors font-medium"
+              >
+                {showEmailComposer ? '✕ Cancel Email' : '📧 Send Email'}
+              </button>
             </div>
           </div>
 

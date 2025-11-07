@@ -331,3 +331,77 @@ export async function deleteAttachment(attachmentId) {
   });
 }
 
+/**
+ * Email Account Management
+ */
+
+/**
+ * Create or update email account
+ */
+export async function createEmailAccount(accountData) {
+  return apiRequest('/admin/email-accounts', {
+    method: 'POST',
+    body: JSON.stringify(accountData),
+  });
+}
+
+/**
+ * List all email accounts
+ */
+export async function listEmailAccounts() {
+  return apiRequest('/admin/email-accounts');
+}
+
+/**
+ * Test email account connection
+ */
+export async function testEmailAccount(accountId) {
+  return apiRequest(`/admin/email-accounts/${encodeURIComponent(accountId)}/test`, {
+    method: 'POST',
+  });
+}
+
+/**
+ * Send email from ticket
+ */
+export async function sendEmailFromTicket(ticketId, emailData) {
+  return apiRequest(`/ticket/${encodeURIComponent(ticketId)}/send-email`, {
+    method: 'POST',
+    body: JSON.stringify(emailData),
+  });
+}
+
+/**
+ * Get email thread for ticket
+ */
+export async function getTicketEmailThread(ticketId) {
+  return apiRequest(`/ticket/${encodeURIComponent(ticketId)}/emails`);
+}
+
+/**
+ * Email Templates
+ */
+
+/**
+ * Create or update email template
+ */
+export async function createEmailTemplate(templateData) {
+  return apiRequest('/admin/email-templates', {
+    method: 'POST',
+    body: JSON.stringify(templateData),
+  });
+}
+
+/**
+ * List email templates
+ */
+export async function listEmailTemplates(templateType = null, isActive = null) {
+  const params = new URLSearchParams();
+  if (templateType) params.append('template_type', templateType);
+  if (isActive !== null) params.append('is_active', isActive);
+  
+  const queryString = params.toString();
+  const url = `/admin/email-templates${queryString ? `?${queryString}` : ''}`;
+  return apiRequest(url);
+}
+

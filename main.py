@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Form
+from fastapi import FastAPI, UploadFile, File, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import Header, HTTPException, status, Depends, Query
 from fastapi.exceptions import RequestValidationError
@@ -20,9 +20,12 @@ from auth import (
     decode_access_token,
 )
 from storage import upload_file, download_file, delete_file, list_attachments
+from email_service import email_service
 import re
 import time
 import io
+import base64
+import json
 
 # Set up logging
 logger = setup_logger(__name__)
@@ -123,6 +126,51 @@ class TimeEntryRequest(BaseModel):
     description: str | None = None
     entry_type: str = "work"  # work, waiting, research, communication, other
     billable: bool = True
+
+
+class EmailAccountRequest(BaseModel):
+    email: EmailStr
+    display_name: str | None = None
+    provider: str  # smtp, sendgrid, ses, mailgun, other
+    smtp_host: str | None = None
+    smtp_port: int | None = None
+    smtp_username: str | None = None
+    smtp_password: str | None = None
+    api_key: str | None = None
+    credentials: dict | None = None
+    is_active: bool = True
+    is_default: bool = False
+
+
+class SendEmailRequest(BaseModel):
+    to_emails: list[EmailStr]
+    subject: str
+    body_text: str
+    body_html: str | None = None
+    cc_emails: list[EmailStr] | None = None
+    bcc_emails: list[EmailStr] | None = None
+    reply_to: EmailStr | None = None
+    account_id: str | None = None
+
+
+class EmailWebhookRequest(BaseModel):
+    raw_email: str | None = None
+    from_email: EmailStr | None = None
+    to_email: EmailStr | None = None
+    subject: str | None = None
+    body: str | None = None
+    message_id: str | None = None
+    in_reply_to: str | None = None
+
+
+class EmailTemplateRequest(BaseModel):
+    name: str
+    subject: str
+    body_text: str
+    body_html: str | None = None
+    template_type: str  # ticket_created, ticket_reply, ticket_closed, ticket_assigned, custom
+    variables: dict | None = None
+    is_active: bool = True
 
 
 # ---------------------------
@@ -2565,3 +2613,630 @@ def delete_attachment(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to delete attachment",
         )
+
+
+# ---------------------------
+# 📧 EMAIL ENDPOINTS
+# ---------------------------
+
+@app.post("/admin/email-accounts")
+def create_email_account(
+    req: EmailAccountRequest,
+    current_admin: dict = Depends(get_current_admin),
+):
+    """Create or update email account configuration."""
+    try:
+        if supabase is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not configured",
+            )
+        
+        # Validate provider
+        valid_providers = ["smtp", "sendgrid", "ses", "mailgun", "other"]
+        if req.provider not in valid_providers:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Provider must be one of: {', '.join(valid_providers)}"
+            )
+        
+        # If setting as default, unset other defaults
+        if req.is_default:
+            supabase.table("email_accounts").update({"is_default": False}).execute()
+        
+        # Encrypt sensitive data (placeholder - implement proper encryption)
+        smtp_password_encrypted = req.smtp_password if req.smtp_password else None
+        api_key_encrypted = req.api_key if req.api_key else None
+        credentials_encrypted = json.dumps(req.credentials) if req.credentials else None
+        
+        account_data = {
+            "email": req.email.lower(),
+            "display_name": req.display_name,
+            "provider": req.provider,
+            "smtp_host": req.smtp_host,
+            "smtp_port": req.smtp_port,
+            "smtp_username": req.smtp_username,
+            "smtp_password_encrypted": smtp_password_encrypted,
+            "api_key_encrypted": api_key_encrypted,
+            "credentials_encrypted": credentials_encrypted,
+            "is_active": req.is_active,
+            "is_default": req.is_default,
+            "created_by": current_admin["id"],
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+        
+        # Check if account exists
+        existing = (
+            supabase.table("email_accounts")
+            .select("id")
+            .eq("email", req.email.lower())
+            .execute()
+        )
+        
+        if existing.data:
+            # Update existing
+            result = (
+                supabase.table("email_accounts")
+                .update(account_data)
+                .eq("id", existing.data[0]["id"])
+                .execute()
+            )
+            logger.info(f"Updated email account: {req.email} by {current_admin['email']}")
+        else:
+            # Create new
+            account_data["created_at"] = datetime.utcnow().isoformat()
+            result = (
+                supabase.table("email_accounts")
+                .insert(account_data)
+                .execute()
+            )
+            logger.info(f"Created email account: {req.email} by {current_admin['email']}")
+        
+        return {"success": True, "account": result.data[0] if result.data else None}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in create_email_account: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create email account",
+        )
+
+
+@app.get("/admin/email-accounts")
+def list_email_accounts(
+    current_admin: dict = Depends(get_current_admin),
+):
+    """List all email accounts."""
+    try:
+        if supabase is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not configured",
+            )
+        
+        result = (
+            supabase.table("email_accounts")
+            .select("id, email, display_name, provider, is_active, is_default, created_at, updated_at")
+            .order("created_at", desc=True)
+            .execute()
+        )
+        
+        return {"accounts": result.data if result.data else []}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in list_email_accounts: {e}", exc_info=True)
+        raise
+
+
+@app.post("/admin/email-accounts/{account_id}/test")
+def test_email_account(
+    account_id: str,
+    current_admin: dict = Depends(get_current_admin),
+):
+    """Test email account connection."""
+    try:
+        if supabase is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not configured",
+            )
+        
+        result = email_service.test_email_connection(account_id)
+        
+        if result.get("success"):
+            return {"success": True, "message": result.get("message", "Connection successful")}
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=result.get("error", "Connection failed")
+            )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in test_email_account: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to test email account",
+        )
+
+
+@app.post("/ticket/{ticket_id}/send-email")
+def send_email_from_ticket(
+    ticket_id: str,
+    req: SendEmailRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Send email from a ticket."""
+    try:
+        if supabase is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not configured",
+            )
+        
+        # Verify ticket exists and user has access
+        ticket_res = (
+            supabase.table("tickets")
+            .select("*")
+            .eq("id", ticket_id)
+            .limit(1)
+            .execute()
+        )
+        if not ticket_res.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Ticket not found",
+            )
+        
+        ticket = ticket_res.data[0]
+        user_id = current_user["id"]
+        user_role = current_user["role"]
+        
+        # Verify access
+        if user_role == "customer" and ticket.get("user_id") != user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You don't have access to this ticket",
+            )
+        
+        # Get email account
+        account_id = req.account_id
+        if not account_id:
+            default_account = email_service.get_default_email_account()
+            if not default_account:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="No email account configured. Please set up an email account first."
+                )
+            account_id = default_account["id"]
+        
+        # Send email
+        result = email_service.send_email(
+            account_id=account_id,
+            to_emails=[email.lower() for email in req.to_emails],
+            subject=req.subject,
+            body_text=req.body_text,
+            body_html=req.body_html,
+            cc_emails=[email.lower() for email in req.cc_emails] if req.cc_emails else None,
+            bcc_emails=[email.lower() for email in req.bcc_emails] if req.bcc_emails else None,
+            reply_to=req.reply_to.lower() if req.reply_to else None,
+        )
+        
+        if not result.get("success"):
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=result.get("error", "Failed to send email")
+            )
+        
+        # Save email message to database
+        email_message_data = {
+            "ticket_id": ticket_id,
+            "email_account_id": account_id,
+            "message_id": result.get("message_id", ""),
+            "subject": req.subject,
+            "body_text": req.body_text,
+            "body_html": req.body_html,
+            "from_email": current_user["email"],
+            "to_email": [email.lower() for email in req.to_emails],
+            "cc_email": [email.lower() for email in req.cc_emails] if req.cc_emails else [],
+            "bcc_email": [email.lower() for email in req.bcc_emails] if req.bcc_emails else [],
+            "status": "sent",
+            "direction": "outbound",
+            "has_attachments": False,
+            "sent_at": datetime.utcnow().isoformat(),
+            "created_at": datetime.utcnow().isoformat(),
+        }
+        
+        email_result = supabase.table("email_messages").insert(email_message_data).execute()
+        
+        # Link to ticket thread
+        if email_result.data:
+            supabase.table("email_threads").insert({
+                "ticket_id": ticket_id,
+                "email_message_id": email_result.data[0]["id"],
+                "thread_position": 1,  # TODO: Calculate proper position
+                "created_at": datetime.utcnow().isoformat(),
+            }).execute()
+        
+        logger.info(f"Email sent from ticket {ticket_id} by {current_user['email']}")
+        
+        return {
+            "success": True,
+            "message": "Email sent successfully",
+            "email_message": email_result.data[0] if email_result.data else None,
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in send_email_from_ticket: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to send email",
+        )
+
+
+@app.post("/webhooks/email")
+async def receive_email_webhook(
+    request: Request,
+):
+    """Receive incoming emails via webhook."""
+    try:
+        if supabase is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not configured",
+            )
+        
+        # Get raw email body
+        try:
+            body = await request.body()
+            raw_email = body.decode("utf-8")
+        except Exception as e:
+            # Try to get from JSON body
+            try:
+                json_body = await request.json()
+                raw_email = json_body.get("raw_email") or json_body.get("body") or ""
+            except:
+                raw_email = ""
+        
+        if not raw_email:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Raw email content required"
+            )
+        
+        parsed = email_service.parse_email(raw_email)
+        if not parsed:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Failed to parse email"
+            )
+        
+        # Find or create ticket
+        ticket_id = None
+        subject = parsed.get("subject", "")
+        from_email = parsed.get("from_email", "")
+        
+        # Check if this is a reply to an existing ticket
+        in_reply_to = parsed.get("in_reply_to", "")
+        if in_reply_to:
+            # Find ticket by email message ID
+            existing_email = (
+                supabase.table("email_messages")
+                .select("ticket_id")
+                .eq("message_id", in_reply_to)
+                .limit(1)
+                .execute()
+            )
+            if existing_email.data:
+                ticket_id = existing_email.data[0]["ticket_id"]
+        
+        # If no ticket found, create new one
+        if not ticket_id:
+            # Extract ticket subject (remove Re:, Fwd:, etc.)
+            clean_subject = re.sub(r'^(Re:|Fwd?:|RE:|FW?:)\s*', '', subject, flags=re.IGNORECASE).strip()
+            
+            # Create new ticket
+            ticket_data = {
+                "context": "email",
+                "subject": clean_subject or "Email from " + from_email,
+                "status": "open",
+                "priority": "medium",
+                "user_id": None,  # Will be linked if user exists
+                "source": "email",
+                "created_at": datetime.utcnow().isoformat(),
+            }
+            
+            # Try to find user by email
+            user_res = (
+                supabase.table("users")
+                .select("id")
+                .eq("email", from_email.lower())
+                .limit(1)
+                .execute()
+            )
+            if user_res.data:
+                ticket_data["user_id"] = user_res.data[0]["id"]
+            
+            ticket_result = supabase.table("tickets").insert(ticket_data).execute()
+            if ticket_result.data:
+                ticket_id = ticket_result.data[0]["id"]
+        
+        if not ticket_id:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to create or find ticket"
+            )
+        
+        # Get default email account for receiving
+        default_account = email_service.get_default_email_account()
+        if not default_account:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="No email account configured"
+            )
+        
+        # Save email message
+        email_message_data = {
+            "ticket_id": ticket_id,
+            "email_account_id": default_account["id"],
+            "message_id": parsed.get("message_id", ""),
+            "in_reply_to": parsed.get("in_reply_to"),
+            "subject": subject,
+            "body_text": parsed.get("body_text", ""),
+            "body_html": parsed.get("body_html"),
+            "from_email": from_email,
+            "to_email": parsed.get("to_emails", []),
+            "cc_email": parsed.get("cc_emails", []),
+            "status": "received",
+            "direction": "inbound",
+            "has_attachments": len(parsed.get("attachments", [])) > 0,
+            "received_at": datetime.utcnow().isoformat(),
+            "created_at": datetime.utcnow().isoformat(),
+        }
+        
+        email_result = supabase.table("email_messages").insert(email_message_data).execute()
+        
+        # Link to ticket thread
+        if email_result.data:
+            # Calculate thread position
+            thread_count = (
+                supabase.table("email_threads")
+                .select("id", count="exact")
+                .eq("ticket_id", ticket_id)
+                .execute()
+                .count
+            )
+            
+            supabase.table("email_threads").insert({
+                "ticket_id": ticket_id,
+                "email_message_id": email_result.data[0]["id"],
+                "thread_position": thread_count + 1,
+                "created_at": datetime.utcnow().isoformat(),
+            }).execute()
+        
+        # Create message in ticket
+        message_text = parsed.get("body_text", "")[:1000]  # Limit length
+        supabase.table("messages").insert({
+            "ticket_id": ticket_id,
+            "sender": "customer" if email_result.data else "system",
+            "message": f"Email received from {from_email}:\n\n{message_text}",
+            "created_at": datetime.utcnow().isoformat(),
+        }).execute()
+        
+        logger.info(f"Email received and linked to ticket {ticket_id}")
+        
+        return {
+            "success": True,
+            "message": "Email received and processed",
+            "ticket_id": ticket_id,
+            "email_message": email_result.data[0] if email_result.data else None,
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in receive_email_webhook: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to process email",
+        )
+
+
+@app.get("/ticket/{ticket_id}/emails")
+def get_ticket_email_thread(
+    ticket_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Get email thread for a ticket."""
+    try:
+        if supabase is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not configured",
+            )
+        
+        # Verify ticket exists and user has access
+        ticket_res = (
+            supabase.table("tickets")
+            .select("*")
+            .eq("id", ticket_id)
+            .limit(1)
+            .execute()
+        )
+        if not ticket_res.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Ticket not found",
+            )
+        
+        ticket = ticket_res.data[0]
+        user_id = current_user["id"]
+        user_role = current_user["role"]
+        
+        # Verify access
+        if user_role == "customer" and ticket.get("user_id") != user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You don't have access to this ticket",
+            )
+        
+        # Get email messages for this ticket
+        email_messages = (
+            supabase.table("email_messages")
+            .select("*")
+            .eq("ticket_id", ticket_id)
+            .order("created_at", desc=False)
+            .execute()
+        )
+        
+        # Get thread positions
+        threads = (
+            supabase.table("email_threads")
+            .select("*")
+            .eq("ticket_id", ticket_id)
+            .order("thread_position", desc=False)
+            .execute()
+        )
+        
+        # Build thread structure
+        thread_map = {t["email_message_id"]: t for t in (threads.data if threads.data else [])}
+        emails = []
+        for msg in (email_messages.data if email_messages.data else []):
+            thread_info = thread_map.get(msg["id"], {})
+            emails.append({
+                **msg,
+                "thread_position": thread_info.get("thread_position", 0),
+            })
+        
+        # Sort by thread position
+        emails.sort(key=lambda x: x.get("thread_position", 0))
+        
+        return {
+            "ticket_id": ticket_id,
+            "emails": emails,
+            "count": len(emails),
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in get_ticket_email_thread: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to get email thread",
+        )
+
+
+# ---------------------------
+# 📧 EMAIL TEMPLATE ENDPOINTS
+# ---------------------------
+
+@app.post("/admin/email-templates")
+def create_email_template(
+    req: EmailTemplateRequest,
+    current_admin: dict = Depends(get_current_admin),
+):
+    """Create or update email template."""
+    try:
+        if supabase is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not configured",
+            )
+        
+        # Validate template type
+        valid_types = ["ticket_created", "ticket_reply", "ticket_closed", "ticket_assigned", "custom"]
+        if req.template_type not in valid_types:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Template type must be one of: {', '.join(valid_types)}"
+            )
+        
+        template_data = {
+            "name": req.name,
+            "subject": req.subject,
+            "body_text": req.body_text,
+            "body_html": req.body_html,
+            "template_type": req.template_type,
+            "variables": json.dumps(req.variables) if req.variables else None,
+            "is_active": req.is_active,
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+        
+        # Check if template exists
+        existing = (
+            supabase.table("email_templates")
+            .select("id")
+            .eq("name", req.name)
+            .execute()
+        )
+        
+        if existing.data:
+            # Update existing
+            result = (
+                supabase.table("email_templates")
+                .update(template_data)
+                .eq("id", existing.data[0]["id"])
+                .execute()
+            )
+            logger.info(f"Updated email template: {req.name} by {current_admin['email']}")
+        else:
+            # Create new
+            template_data["created_at"] = datetime.utcnow().isoformat()
+            template_data["created_by"] = current_admin["id"]
+            result = (
+                supabase.table("email_templates")
+                .insert(template_data)
+                .execute()
+            )
+            logger.info(f"Created email template: {req.name} by {current_admin['email']}")
+        
+        return {"success": True, "template": result.data[0] if result.data else None}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in create_email_template: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create email template",
+        )
+
+
+@app.get("/admin/email-templates")
+def list_email_templates(
+    template_type: str | None = Query(None),
+    is_active: bool | None = Query(None),
+    current_admin: dict = Depends(get_current_admin),
+):
+    """List email templates."""
+    try:
+        if supabase is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not configured",
+            )
+        
+        query = supabase.table("email_templates").select("*")
+        
+        if template_type:
+            query = query.eq("template_type", template_type)
+        if is_active is not None:
+            query = query.eq("is_active", is_active)
+        
+        result = query.order("created_at", desc=True).execute()
+        
+        return {"templates": result.data if result.data else []}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in list_email_templates: {e}", exc_info=True)
+        raise

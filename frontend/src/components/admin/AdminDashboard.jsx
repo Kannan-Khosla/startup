@@ -97,24 +97,13 @@ export default function AdminDashboard() {
   const displayPagination = view === 'assigned' ? assignedPagination : pagination;
 
   return (
-    <div className="min-h-screen bg-gray-900 text-white">
-      {/* Header */}
-      <header className="bg-gray-800 border-b border-gray-700 px-6 py-4">
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-2xl font-bold text-white">Admin Dashboard</h1>
-            <p className="text-sm text-gray-400">Welcome, {user?.name}</p>
-          </div>
-          <button
-            onClick={logout}
-            className="px-4 py-2 bg-red-500/20 text-red-400 border border-red-500/50 rounded-lg hover:bg-red-500/30 transition-colors"
-          >
-            Logout
-          </button>
-        </div>
-      </header>
+    <div className="min-h-screen bg-gray-900 text-white p-6">
+      <div className="mb-6">
+        <h1 className="text-2xl font-bold text-white">Admin Dashboard</h1>
+        <p className="text-sm text-gray-400">Welcome, {user?.name}</p>
+      </div>
 
-      <div className="flex h-[calc(100vh-73px)]">
+      <div className="flex h-[calc(100vh-200px)]">
         {/* Sidebar */}
         <aside className="w-80 bg-gray-800 border-r border-gray-700 p-6 overflow-y-auto">
           {/* Stats */}
