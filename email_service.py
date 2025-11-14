@@ -36,8 +36,9 @@ class EmailService:
             return None
     
     def get_default_email_account(self) -> Optional[Dict]:
-        """Get default email account."""
+        """Get default email account. Falls back to any active account if no default is set."""
         try:
+            # First, try to get the default active account
             result = (
                 self.supabase.table("email_accounts")
                 .select("*")
@@ -47,7 +48,24 @@ class EmailService:
                 .execute()
             )
             if result.data:
+                logger.info(f"Found default email account: {result.data[0].get('email')}")
                 return result.data[0]
+            
+            # Fallback: Get any active account if no default is set
+            logger.warning("No default email account found. Trying to find any active account...")
+            fallback_result = (
+                self.supabase.table("email_accounts")
+                .select("*")
+                .eq("is_active", True)
+                .limit(1)
+                .execute()
+            )
+            if fallback_result.data:
+                logger.info(f"Using fallback active email account: {fallback_result.data[0].get('email')}")
+                return fallback_result.data[0]
+            
+            # No active accounts found
+            logger.error("No active email accounts found in database")
             return None
         except Exception as e:
             logger.error(f"Error getting default email account: {e}", exc_info=True)

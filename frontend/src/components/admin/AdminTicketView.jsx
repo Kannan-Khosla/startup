@@ -1,7 +1,20 @@
 import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext';
-import { getTicket, adminReply, assignTicketToAdmin, closeTicket, listTickets, listAttachments } from '../../services/api';
+import { 
+  getTicket, 
+  adminReply, 
+  assignTicketToAdmin, 
+  closeTicket, 
+  listTickets, 
+  listAttachments,
+  getTicketTags,
+  addTagsToTicket,
+  removeTagFromTicket,
+  listTags,
+  listCategories,
+  setTicketCategory
+} from '../../services/api';
 import Loading from '../Loading';
 import AttachmentList from '../AttachmentList';
 import FileUpload from '../FileUpload';
@@ -87,11 +100,18 @@ export default function AdminTicketView() {
   const [ticketAttachments, setTicketAttachments] = useState([]);
   const [showEmailComposer, setShowEmailComposer] = useState(false);
   const [activeTab, setActiveTab] = useState('messages'); // 'messages' or 'emails'
+  const [ticketTags, setTicketTags] = useState([]);
+  const [availableTags, setAvailableTags] = useState([]);
+  const [availableCategories, setAvailableCategories] = useState([]);
+  const [showTagSelector, setShowTagSelector] = useState(false);
   const messagesEndRef = useRef(null);
 
   useEffect(() => {
     loadThread();
     loadAdmins();
+    loadTicketTags();
+    loadAvailableTags();
+    loadAvailableCategories();
   }, [ticketId]);
 
   useEffect(() => {
@@ -216,6 +236,55 @@ export default function AdminTicketView() {
     }
   };
 
+  const loadTicketTags = async () => {
+    const { data, error } = await getTicketTags(ticketId);
+    if (!error && data) {
+      setTicketTags(data.tags || []);
+    }
+  };
+
+  const loadAvailableTags = async () => {
+    const { data, error } = await listTags();
+    if (!error && data) {
+      setAvailableTags(data.tags || []);
+    }
+  };
+
+  const loadAvailableCategories = async () => {
+    const { data, error } = await listCategories();
+    if (!error && data) {
+      setAvailableCategories(data.categories || []);
+    }
+  };
+
+  const handleAddTag = async (tagId) => {
+    const { error } = await addTagsToTicket(ticketId, [tagId]);
+    if (error) {
+      alert(`Failed to add tag: ${error}`);
+    } else {
+      await loadTicketTags();
+      setShowTagSelector(false);
+    }
+  };
+
+  const handleRemoveTag = async (tagId) => {
+    const { error } = await removeTagFromTicket(ticketId, tagId);
+    if (error) {
+      alert(`Failed to remove tag: ${error}`);
+    } else {
+      await loadTicketTags();
+    }
+  };
+
+  const handleSetCategory = async (category) => {
+    const { error } = await setTicketCategory(ticketId, category);
+    if (error) {
+      alert(`Failed to set category: ${error}`);
+    } else {
+      await loadThread();
+    }
+  };
+
   if (loading) {
     return (
       <div className="min-h-screen bg-gray-900 flex items-center justify-center">
@@ -256,12 +325,6 @@ export default function AdminTicketView() {
               className="px-4 py-2 bg-red-500/20 text-red-400 border border-red-500/50 rounded-lg hover:bg-red-500/30 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >
               {closing ? 'Closing...' : 'Close Ticket'}
-            </button>
-            <button
-              onClick={logout}
-              className="px-4 py-2 bg-red-500/20 text-red-400 border border-red-500/50 rounded-lg hover:bg-red-500/30 transition-colors"
-            >
-              Logout
             </button>
           </div>
         </div>
@@ -421,6 +484,74 @@ export default function AdminTicketView() {
                 {assigning ? 'Assigning...' : 'Assign'}
               </button>
             </div>
+          </div>
+
+          {/* Tags Section */}
+          <div className="mb-6">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wide">Tags</h3>
+              <button
+                onClick={() => setShowTagSelector(!showTagSelector)}
+                className="text-xs px-2 py-1 bg-accent/20 text-accent border border-accent/30 rounded hover:bg-accent/30 transition-all"
+              >
+                + Add
+              </button>
+            </div>
+            {showTagSelector && (
+              <div className="mb-3 p-3 bg-gray-900 border border-gray-700 rounded-lg max-h-40 overflow-y-auto">
+                {availableTags.filter(tag => !ticketTags.find(tt => tt.id === tag.id)).map(tag => (
+                  <button
+                    key={tag.id}
+                    onClick={() => handleAddTag(tag.id)}
+                    className="w-full text-left px-3 py-2 mb-1 bg-gray-800 hover:bg-gray-700 rounded text-sm text-white transition-colors"
+                  >
+                    {tag.name}
+                  </button>
+                ))}
+                {availableTags.filter(tag => !ticketTags.find(tt => tt.id === tag.id)).length === 0 && (
+                  <p className="text-xs text-gray-500 text-center py-2">No tags available</p>
+                )}
+              </div>
+            )}
+            <div className="flex flex-wrap gap-2">
+              {ticketTags.map(tag => (
+                <span
+                  key={tag.id}
+                  className="px-3 py-1 rounded-full text-xs flex items-center gap-2"
+                  style={{
+                    backgroundColor: tag.color ? `${tag.color}20` : 'rgba(99, 102, 241, 0.2)',
+                    color: tag.color || '#818cf8',
+                    border: `1px solid ${tag.color ? `${tag.color}50` : 'rgba(99, 102, 241, 0.3)'}`
+                  }}
+                >
+                  {tag.name}
+                  <button
+                    onClick={() => handleRemoveTag(tag.id)}
+                    className="hover:text-red-400 transition-colors"
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+              {ticketTags.length === 0 && (
+                <p className="text-xs text-gray-500">No tags</p>
+              )}
+            </div>
+          </div>
+
+          {/* Category Section */}
+          <div className="mb-6">
+            <h3 className="text-sm font-semibold text-gray-400 mb-3 uppercase tracking-wide">Category</h3>
+            <select
+              value={ticket.category || ''}
+              onChange={(e) => handleSetCategory(e.target.value || null)}
+              className="w-full px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-orange-500"
+            >
+              <option value="">None</option>
+              {availableCategories.map(cat => (
+                <option key={cat.id} value={cat.name}>{cat.name}</option>
+              ))}
+            </select>
           </div>
         </aside>
       </div>

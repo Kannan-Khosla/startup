@@ -105,29 +105,30 @@ export default function EmailAccountManager() {
   }
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h2 className="text-2xl font-bold text-white">Email Accounts</h2>
-        <button
-          onClick={() => {
-            resetForm();
-            setShowForm(!showForm);
-          }}
-          className="px-4 py-2 bg-orange-500 text-white rounded-lg hover:bg-orange-600 transition-colors"
-        >
-          {showForm ? 'Cancel' : '+ Add Email Account'}
-        </button>
-      </div>
+    <div className="min-h-screen bg-bg text-text p-6">
+      <div className="max-w-6xl mx-auto space-y-6">
+        <div className="flex items-center justify-between">
+          <h2 className="text-2xl font-bold gradient-text">Email Accounts</h2>
+          <button
+            onClick={() => {
+              resetForm();
+              setShowForm(!showForm);
+            }}
+            className="px-4 py-2 bg-accent text-white rounded-lg hover:bg-accent-hover transition-all glow-hover"
+          >
+            {showForm ? 'Cancel' : '+ Add Email Account'}
+          </button>
+        </div>
 
       {showForm && (
-        <form onSubmit={handleSubmit} className="bg-gray-800 border border-gray-700 rounded-lg p-6 space-y-4">
-          <h3 className="text-lg font-semibold text-white">
+        <form onSubmit={handleSubmit} className="glass border border-border rounded-lg p-6 space-y-4">
+          <h3 className="text-lg font-semibold text-text">
             {editingAccount ? 'Edit Email Account' : 'New Email Account'}
           </h3>
 
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-2">
+              <label className="block text-sm font-medium text-text-secondary mb-2">
                 Email Address *
               </label>
               <input
@@ -135,19 +136,19 @@ export default function EmailAccountManager() {
                 value={formData.email}
                 onChange={(e) => setFormData({ ...formData, email: e.target.value })}
                 required
-                className="w-full px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-orange-500"
+                className="w-full px-4 py-2 bg-panel border border-border rounded-lg text-text focus:outline-none focus:ring-2 focus:ring-accent"
               />
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-2">
+              <label className="block text-sm font-medium text-text-secondary mb-2">
                 Display Name
               </label>
               <input
                 type="text"
                 value={formData.display_name}
                 onChange={(e) => setFormData({ ...formData, display_name: e.target.value })}
-                className="w-full px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-orange-500"
+                className="w-full px-4 py-2 bg-panel border border-border rounded-lg text-text focus:outline-none focus:ring-2 focus:ring-accent"
               />
             </div>
           </div>
@@ -160,7 +161,7 @@ export default function EmailAccountManager() {
               value={formData.provider}
               onChange={(e) => setFormData({ ...formData, provider: e.target.value })}
               required
-              className="w-full px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-orange-500"
+              className="w-full px-4 py-2 bg-panel border border-border rounded-lg text-text focus:outline-none focus:ring-2 focus:ring-accent"
             >
               <option value="smtp">SMTP</option>
               <option value="sendgrid">SendGrid</option>
@@ -174,7 +175,7 @@ export default function EmailAccountManager() {
             <>
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-gray-300 mb-2">
+                  <label className="block text-sm font-medium text-text-secondary mb-2">
                     SMTP Host *
                   </label>
                   <input
@@ -183,12 +184,12 @@ export default function EmailAccountManager() {
                     onChange={(e) => setFormData({ ...formData, smtp_host: e.target.value })}
                     placeholder="smtp.gmail.com"
                     required
-                    className="w-full px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-orange-500"
+                    className="w-full px-4 py-2 bg-panel border border-border rounded-lg text-text focus:outline-none focus:ring-2 focus:ring-accent"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium text-gray-300 mb-2">
+                  <label className="block text-sm font-medium text-text-secondary mb-2">
                     SMTP Port *
                   </label>
                   <input
@@ -196,14 +197,14 @@ export default function EmailAccountManager() {
                     value={formData.smtp_port}
                     onChange={(e) => setFormData({ ...formData, smtp_port: parseInt(e.target.value) })}
                     required
-                    className="w-full px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-orange-500"
+                    className="w-full px-4 py-2 bg-panel border border-border rounded-lg text-text focus:outline-none focus:ring-2 focus:ring-accent"
                   />
                 </div>
               </div>
 
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-gray-300 mb-2">
+                  <label className="block text-sm font-medium text-text-secondary mb-2">
                     SMTP Username *
                   </label>
                   <input
@@ -211,12 +212,12 @@ export default function EmailAccountManager() {
                     value={formData.smtp_username}
                     onChange={(e) => setFormData({ ...formData, smtp_username: e.target.value })}
                     required
-                    className="w-full px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-orange-500"
+                    className="w-full px-4 py-2 bg-panel border border-border rounded-lg text-text focus:outline-none focus:ring-2 focus:ring-accent"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium text-gray-300 mb-2">
+                  <label className="block text-sm font-medium text-text-secondary mb-2">
                     SMTP Password *
                   </label>
                   <input
@@ -225,7 +226,7 @@ export default function EmailAccountManager() {
                     onChange={(e) => setFormData({ ...formData, smtp_password: e.target.value })}
                     required={!editingAccount}
                     placeholder={editingAccount ? "Leave blank to keep current" : ""}
-                    className="w-full px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-orange-500"
+                    className="w-full px-4 py-2 bg-panel border border-border rounded-lg text-text focus:outline-none focus:ring-2 focus:ring-accent"
                   />
                 </div>
               </div>
@@ -234,7 +235,7 @@ export default function EmailAccountManager() {
 
           {formData.provider === 'sendgrid' && (
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-2">
+              <label className="block text-sm font-medium text-text-secondary mb-2">
                 SendGrid API Key *
               </label>
               <input
@@ -243,7 +244,7 @@ export default function EmailAccountManager() {
                 onChange={(e) => setFormData({ ...formData, api_key: e.target.value })}
                 required={!editingAccount}
                 placeholder={editingAccount ? "Leave blank to keep current" : ""}
-                className="w-full px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-orange-500"
+                className="w-full px-4 py-2 bg-panel border border-border rounded-lg text-text focus:outline-none focus:ring-2 focus:ring-accent"
               />
             </div>
           )}
@@ -254,9 +255,9 @@ export default function EmailAccountManager() {
                 type="checkbox"
                 checked={formData.is_active}
                 onChange={(e) => setFormData({ ...formData, is_active: e.target.checked })}
-                className="w-4 h-4 text-orange-500 bg-gray-900 border-gray-700 rounded focus:ring-orange-500"
+                className="w-4 h-4 text-accent bg-panel border-border rounded focus:ring-accent"
               />
-              <span className="text-sm text-gray-300">Active</span>
+              <span className="text-sm text-text-secondary">Active</span>
             </label>
 
             <label className="flex items-center gap-2">
@@ -264,16 +265,16 @@ export default function EmailAccountManager() {
                 type="checkbox"
                 checked={formData.is_default}
                 onChange={(e) => setFormData({ ...formData, is_default: e.target.checked })}
-                className="w-4 h-4 text-orange-500 bg-gray-900 border-gray-700 rounded focus:ring-orange-500"
+                className="w-4 h-4 text-accent bg-panel border-border rounded focus:ring-accent"
               />
-              <span className="text-sm text-gray-300">Default</span>
+              <span className="text-sm text-text-secondary">Default</span>
             </label>
           </div>
 
           <div className="flex gap-3 pt-2">
             <button
               type="submit"
-              className="px-6 py-2 bg-orange-500 text-white font-semibold rounded-lg hover:bg-orange-600 transition-colors"
+              className="px-6 py-2 bg-accent text-white font-semibold rounded-lg hover:bg-accent-hover transition-all"
             >
               {editingAccount ? 'Update' : 'Create'} Account
             </button>
@@ -283,7 +284,7 @@ export default function EmailAccountManager() {
                 setShowForm(false);
                 resetForm();
               }}
-              className="px-6 py-2 bg-gray-700 text-white font-semibold rounded-lg hover:bg-gray-600 transition-colors"
+              className="px-6 py-2 glass border border-border text-text font-semibold rounded-lg hover:bg-panel-hover transition-all"
             >
               Cancel
             </button>
@@ -293,18 +294,18 @@ export default function EmailAccountManager() {
 
       <div className="space-y-3">
         {accounts.length === 0 ? (
-          <div className="text-center text-gray-400 py-8">
+          <div className="text-center text-muted py-8">
             <p>No email accounts configured</p>
           </div>
         ) : (
           accounts.map((account) => (
             <div
               key={account.id}
-              className="bg-gray-800 border border-gray-700 rounded-lg p-4 flex items-center justify-between"
+              className="glass border border-border rounded-lg p-4 flex items-center justify-between"
             >
               <div className="flex-1">
                 <div className="flex items-center gap-3">
-                  <span className="text-lg font-semibold text-white">
+                  <span className="text-lg font-semibold text-text">
                     {account.display_name || account.email}
                   </span>
                   {account.is_default && (
@@ -322,7 +323,7 @@ export default function EmailAccountManager() {
                     </span>
                   )}
                 </div>
-                <div className="text-sm text-gray-400 mt-1">
+                <div className="text-sm text-text-secondary mt-1">
                   {account.email} • {account.provider.toUpperCase()}
                 </div>
               </div>
@@ -330,13 +331,13 @@ export default function EmailAccountManager() {
                 <button
                   onClick={() => handleTest(account.id)}
                   disabled={testing[account.id]}
-                  className="px-3 py-1.5 text-xs bg-blue-500/20 text-blue-400 border border-blue-500/50 rounded hover:bg-blue-500/30 disabled:opacity-50 transition-colors"
+                  className="px-3 py-1.5 text-xs bg-blue-500/10 text-blue-400 border border-blue-500/30 rounded hover:bg-blue-500/20 disabled:opacity-50 transition-all"
                 >
                   {testing[account.id] ? 'Testing...' : 'Test'}
                 </button>
                 <button
                   onClick={() => handleEdit(account)}
-                  className="px-3 py-1.5 text-xs bg-gray-700 text-white rounded hover:bg-gray-600 transition-colors"
+                  className="px-3 py-1.5 text-xs glass border border-border text-text rounded hover:bg-panel-hover transition-all"
                 >
                   Edit
                 </button>
@@ -344,6 +345,7 @@ export default function EmailAccountManager() {
             </div>
           ))
         )}
+      </div>
       </div>
     </div>
   );

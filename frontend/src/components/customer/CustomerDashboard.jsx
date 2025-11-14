@@ -8,8 +8,8 @@ function Badge({ status }) {
   const className = {
     open: 'bg-green-500/20 text-green-400 border-green-500/50',
     human_assigned: 'bg-yellow-500/20 text-yellow-400 border-yellow-500/50',
-    closed: 'bg-gray-500/20 text-gray-400 border-gray-500/50',
-  }[status] || 'bg-gray-500/20 text-gray-400 border-gray-500/50';
+    closed: 'bg-muted/20 text-muted border-border',
+  }[status] || 'bg-muted/20 text-muted border-border';
   
   return (
     <span className={`text-xs px-3 py-1 rounded-full border font-medium ${className}`}>
@@ -95,17 +95,24 @@ export default function CustomerDashboard() {
   };
 
   return (
-    <div className="min-h-screen bg-gray-900 text-white">
+    <div className="min-h-screen bg-bg text-text">
       {/* Header */}
-      <header className="bg-gray-800 border-b border-gray-700 px-6 py-4">
+      <header className="glass border-b border-border px-6 py-4 sticky top-0 z-50">
         <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-2xl font-bold text-white">Support Portal</h1>
-            <p className="text-sm text-gray-400">Welcome, {user?.name}</p>
+          <div className="flex items-center gap-4">
+            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center glow">
+              <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+              </svg>
+            </div>
+            <div>
+              <h1 className="text-2xl font-bold gradient-text">Nexus</h1>
+              <p className="text-sm text-muted">Welcome back, {user?.name}</p>
+            </div>
           </div>
           <button
             onClick={logout}
-            className="px-4 py-2 bg-red-500/20 text-red-400 border border-red-500/50 rounded-lg hover:bg-red-500/30 transition-colors"
+            className="px-4 py-2 bg-red-500/10 text-red-400 border border-red-500/30 rounded-lg hover:bg-red-500/20 transition-all text-sm font-medium"
           >
             Logout
           </button>
@@ -114,35 +121,35 @@ export default function CustomerDashboard() {
 
       <div className="flex h-[calc(100vh-73px)]">
         {/* Sidebar */}
-        <aside className="w-80 bg-gray-800 border-r border-gray-700 p-6 overflow-y-auto">
+        <aside className="w-80 glass border-r border-border p-6 overflow-y-auto">
           <div className="mb-6">
-            <h2 className="text-lg font-semibold text-white mb-4">New Ticket</h2>
+            <h2 className="text-lg font-semibold text-text mb-4">New Ticket</h2>
             <div className="space-y-3">
               <input
                 type="text"
                 value={context}
                 onChange={(e) => setContext(e.target.value)}
                 placeholder="Context (e.g., Product Issue)"
-                className="w-full px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-orange-500"
+                className="w-full px-4 py-2 bg-panel border border-border rounded-lg text-text placeholder-muted focus:outline-none focus:ring-2 focus:ring-accent hover:border-accent/50 transition-all"
               />
               <input
                 type="text"
                 value={subject}
                 onChange={(e) => setSubject(e.target.value)}
                 placeholder="Subject"
-                className="w-full px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-orange-500"
+                className="w-full px-4 py-2 bg-panel border border-border rounded-lg text-text placeholder-muted focus:outline-none focus:ring-2 focus:ring-accent hover:border-accent/50 transition-all"
               />
               <textarea
                 value={message}
                 onChange={(e) => setMessage(e.target.value)}
                 placeholder="Message"
                 rows={3}
-                className="w-full px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-orange-500 resize-none"
+                className="w-full px-4 py-2 bg-panel border border-border rounded-lg text-text placeholder-muted focus:outline-none focus:ring-2 focus:ring-accent hover:border-accent/50 transition-all resize-none"
               />
               <button
                 onClick={handleCreateTicket}
                 disabled={creating || !context.trim() || !subject.trim() || !message.trim()}
-                className="w-full py-2 bg-gradient-to-r from-orange-500 to-orange-600 text-white font-semibold rounded-lg hover:from-orange-600 hover:to-orange-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                className="w-full py-2 bg-gradient-to-r from-indigo-600 to-purple-600 text-white font-semibold rounded-lg hover:from-indigo-500 hover:to-purple-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-lg shadow-indigo-500/30 glow-hover"
               >
                 {creating ? 'Creating...' : 'Create Ticket'}
               </button>
@@ -151,23 +158,23 @@ export default function CustomerDashboard() {
 
           {/* Search */}
           <div className="mb-6">
-            <h3 className="text-sm font-semibold text-gray-400 mb-3 uppercase tracking-wide">Search</h3>
+            <h3 className="text-sm font-semibold text-muted mb-3 uppercase tracking-wide">Search</h3>
             <input
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder="Search tickets..."
-              className="w-full px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-orange-500"
+              className="w-full px-4 py-2 bg-panel border border-border rounded-lg text-text placeholder-muted focus:outline-none focus:ring-2 focus:ring-accent hover:border-accent/50 transition-all"
             />
           </div>
 
           {/* Filters */}
           <div className="mb-6">
             <div className="flex items-center justify-between mb-3">
-              <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wide">Filters</h3>
+              <h3 className="text-sm font-semibold text-muted uppercase tracking-wide">Filters</h3>
               <button
                 onClick={() => setShowFilters(!showFilters)}
-                className="text-xs text-orange-400 hover:text-orange-300"
+                className="text-xs text-accent hover:text-accent-hover transition-colors"
               >
                 {showFilters ? 'Hide' : 'Show'}
               </button>
@@ -178,7 +185,7 @@ export default function CustomerDashboard() {
                 <select
                   value={statusFilter}
                   onChange={(e) => setStatusFilter(e.target.value)}
-                  className="w-full px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-orange-500"
+                  className="w-full px-4 py-2 bg-panel border border-border rounded-lg text-text focus:outline-none focus:ring-2 focus:ring-accent hover:border-accent/50 transition-all"
                 >
                   <option value="">All Statuses</option>
                   <option value="open">Open</option>
@@ -191,38 +198,38 @@ export default function CustomerDashboard() {
                   value={contextFilter}
                   onChange={(e) => setContextFilter(e.target.value)}
                   placeholder="Context/Brand"
-                  className="w-full px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-orange-500"
+                  className="w-full px-4 py-2 bg-panel border border-border rounded-lg text-text placeholder-muted focus:outline-none focus:ring-2 focus:ring-accent hover:border-accent/50 transition-all"
                 />
                 
                 <div className="space-y-2">
-                  <label className="text-xs text-gray-400">Date From</label>
+                  <label className="text-xs text-muted">Date From</label>
                   <input
                     type="date"
                     value={dateFrom}
                     onChange={(e) => setDateFrom(e.target.value)}
-                    className="w-full px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-orange-500"
+                    className="w-full px-4 py-2 bg-panel border border-border rounded-lg text-text focus:outline-none focus:ring-2 focus:ring-accent hover:border-accent/50 transition-all"
                   />
                 </div>
                 
                 <div className="space-y-2">
-                  <label className="text-xs text-gray-400">Date To</label>
+                  <label className="text-xs text-muted">Date To</label>
                   <input
                     type="date"
                     value={dateTo}
                     onChange={(e) => setDateTo(e.target.value)}
-                    className="w-full px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-orange-500"
+                    className="w-full px-4 py-2 bg-panel border border-border rounded-lg text-text focus:outline-none focus:ring-2 focus:ring-accent hover:border-accent/50 transition-all"
                   />
                 </div>
                 
                 <div className="space-y-2">
-                  <label className="text-xs text-gray-400">Items per page</label>
+                  <label className="text-xs text-muted">Items per page</label>
                   <select
                     value={pageSize}
                     onChange={(e) => {
                       setPageSize(Number(e.target.value));
                       setPage(1);
                     }}
-                    className="w-full px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-orange-500"
+                    className="w-full px-4 py-2 bg-panel border border-border rounded-lg text-text focus:outline-none focus:ring-2 focus:ring-accent hover:border-accent/50 transition-all"
                   >
                     <option value={5}>5</option>
                     <option value={10}>10</option>
@@ -233,7 +240,7 @@ export default function CustomerDashboard() {
                 
                 <button
                   onClick={clearFilters}
-                  className="w-full px-4 py-2 bg-gray-700 text-gray-300 rounded-lg hover:bg-gray-600 transition-colors text-sm"
+                  className="w-full px-4 py-2 bg-panel-hover text-text-secondary rounded-lg hover:bg-panel-hover hover:text-text transition-all text-sm border border-border"
                 >
                   Clear Filters
                 </button>
@@ -246,11 +253,11 @@ export default function CustomerDashboard() {
         <main className="flex-1 p-6 overflow-y-auto">
           <div className="mb-6 flex items-center justify-between">
             <div>
-              <h2 className="text-xl font-semibold text-white mb-2">My Tickets</h2>
-              <p className="text-sm text-gray-400">Manage and track your support tickets</p>
+              <h2 className="text-xl font-semibold text-text mb-2">My Tickets</h2>
+              <p className="text-sm text-muted">Manage and track your support tickets</p>
             </div>
             {pagination && (
-              <div className="text-sm text-gray-400">
+              <div className="text-sm text-muted">
                 Showing {tickets.length > 0 ? (page - 1) * pageSize + 1 : 0} - {Math.min(page * pageSize, pagination.total_count)} of {pagination.total_count} tickets
               </div>
             )}
@@ -261,7 +268,7 @@ export default function CustomerDashboard() {
               <Loading />
             </div>
           ) : tickets.length === 0 ? (
-            <div className="text-center py-12 text-gray-400">
+            <div className="text-center py-12 text-muted">
               <p className="text-lg mb-2">No tickets yet</p>
               <p className="text-sm">Create a new ticket to get started</p>
             </div>
@@ -271,14 +278,14 @@ export default function CustomerDashboard() {
                 <div
                   key={ticket.id}
                   onClick={() => navigate(`/customer/ticket/${ticket.id}`)}
-                  className="bg-gray-800 border border-gray-700 rounded-lg p-4 hover:border-orange-500/50 hover:bg-gray-750 cursor-pointer transition-all"
+                  className="glass border border-border rounded-lg p-4 hover:border-accent/50 hover:bg-panel-hover cursor-pointer transition-all hover-lift"
                 >
                   <div className="flex items-start justify-between mb-2">
-                    <h3 className="text-lg font-semibold text-white">{ticket.subject}</h3>
+                    <h3 className="text-lg font-semibold text-text">{ticket.subject}</h3>
                     <Badge status={ticket.status} />
                   </div>
-                  <p className="text-sm text-gray-400 mb-2">{ticket.context}</p>
-                  <p className="text-xs text-gray-500">
+                  <p className="text-sm text-text-secondary mb-2">{ticket.context}</p>
+                  <p className="text-xs text-muted">
                     Created: {new Date(ticket.created_at).toLocaleString()}
                   </p>
                 </div>
@@ -292,7 +299,7 @@ export default function CustomerDashboard() {
               <button
                 onClick={() => setPage(p => Math.max(1, p - 1))}
                 disabled={!pagination.has_prev || loading}
-                className="px-4 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                className="px-4 py-2 glass border border-border rounded-lg text-text hover:bg-panel-hover disabled:opacity-50 disabled:cursor-not-allowed transition-all"
               >
                 Previous
               </button>
@@ -313,11 +320,11 @@ export default function CustomerDashboard() {
                       key={pageNum}
                       onClick={() => setPage(pageNum)}
                       disabled={loading}
-                      className={`px-4 py-2 rounded-lg transition-colors ${
-                        pageNum === pagination.page
-                          ? 'bg-orange-500 text-white'
-                          : 'bg-gray-800 border border-gray-700 text-white hover:bg-gray-700'
-                      } disabled:opacity-50 disabled:cursor-not-allowed`}
+                className={`px-4 py-2 rounded-lg transition-all ${
+                  pageNum === pagination.page
+                    ? 'bg-accent text-white glow'
+                    : 'glass border border-border text-text hover:bg-panel-hover'
+                } disabled:opacity-50 disabled:cursor-not-allowed`}
                     >
                       {pageNum}
                     </button>
@@ -327,7 +334,7 @@ export default function CustomerDashboard() {
               <button
                 onClick={() => setPage(p => Math.min(pagination.total_pages, p + 1))}
                 disabled={!pagination.has_next || loading}
-                className="px-4 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                className="px-4 py-2 glass border border-border rounded-lg text-text hover:bg-panel-hover disabled:opacity-50 disabled:cursor-not-allowed transition-all"
               >
                 Next
               </button>

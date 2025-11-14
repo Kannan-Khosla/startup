@@ -21,6 +21,7 @@ from auth import (
 )
 from storage import upload_file, download_file, delete_file, list_attachments
 from email_service import email_service
+from routing_service import routing_service
 import re
 import time
 import io
@@ -173,6 +174,55 @@ class EmailTemplateRequest(BaseModel):
     is_active: bool = True
 
 
+class DeleteTicketsRequest(BaseModel):
+    ticket_ids: list[str]
+
+
+class RestoreTicketsRequest(BaseModel):
+    ticket_ids: list[str]
+
+
+class OrganizationRequest(BaseModel):
+    name: str
+    slug: str
+    description: str | None = None
+
+
+class InviteMemberRequest(BaseModel):
+    email: EmailStr
+    role: str = "admin"  # admin or viewer
+
+
+class RoutingRuleRequest(BaseModel):
+    name: str
+    description: str | None = None
+    priority: int = 0
+    is_active: bool = True
+    conditions: dict  # {keywords: [], issue_types: [], tags: [], context: [], priority: []}
+    action_type: str  # assign_to_agent, assign_to_group, set_priority, add_tag, set_category
+    action_value: str  # Agent email, group name, priority value, tag name, category name
+
+
+class TagRequest(BaseModel):
+    name: str
+    color: str | None = None
+    description: str | None = None
+
+
+class CategoryRequest(BaseModel):
+    name: str
+    color: str | None = None
+    description: str | None = None
+
+
+class TicketTagsRequest(BaseModel):
+    tag_ids: list[str]
+
+
+class TicketCategoryRequest(BaseModel):
+    category: str | None = None
+
+
 # ---------------------------
 # 🧠 ROUTES
 # ---------------------------
@@ -225,11 +275,21 @@ def get_current_customer(current_user: dict = Depends(get_current_user)) -> dict
 
 
 def get_current_admin(current_user: dict = Depends(get_current_user)) -> dict:
-    """Get current user, ensuring they are an admin."""
-    if current_user["role"] != "admin":
+    """Get current user, ensuring they are an admin or super_admin."""
+    if current_user["role"] not in ["admin", "super_admin"]:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Admin access required",
+        )
+    return current_user
+
+
+def get_current_super_admin(current_user: dict = Depends(get_current_user)) -> dict:
+    """Get current user, ensuring they are a super_admin."""
+    if current_user["role"] != "super_admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Super admin access required",
         )
     return current_user
 
@@ -751,7 +811,7 @@ def create_or_continue_ticket(
                         "sla_id": sla_id,
                         "user_id": user_id,
                         "source": "web",
-                        "created_at": datetime.utcnow().isoformat(),
+                        "created_at": datetime.now(timezone.utc).isoformat(),
                     }
                 )
                 .execute()
@@ -759,6 +819,25 @@ def create_or_continue_ticket(
             ticket = new_ticket.data[0]
             ticket_id = ticket["id"]
             logger.info(f"Created new ticket: {ticket_id}")
+            
+            # Apply routing rules if organization exists
+            if ticket.get("organization_id"):
+                try:
+                    routing_result = routing_service.apply_routing_rules(ticket_id, ticket.get("organization_id"))
+                    if routing_result.get("success") and routing_result.get("rules_matched", 0) > 0:
+                        logger.info(f"Applied {routing_result['rules_matched']} routing rule(s) to ticket {ticket_id}")
+                        # Reload ticket to get updated assignment/priority
+                        ticket_res = (
+                            supabase.table("tickets")
+                            .select("*")
+                            .eq("id", ticket_id)
+                            .limit(1)
+                            .execute()
+                        )
+                        if ticket_res.data:
+                            ticket = ticket_res.data[0]
+                except Exception as e:
+                    logger.warning(f"Failed to apply routing rules to ticket {ticket_id}: {e}")
 
         # 2️⃣ Add customer message
         supabase.table("messages").insert(
@@ -766,7 +845,7 @@ def create_or_continue_ticket(
                 "ticket_id": ticket_id,
                 "sender": "customer",
                 "message": req.message,
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
             }
         ).execute()
 
@@ -826,7 +905,7 @@ def create_or_continue_ticket(
                 "message": answer,
                 "confidence": 0.95,
                 "success": True,
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
             }
         ).execute()
 
@@ -877,7 +956,7 @@ def reply_to_existing_ticket(
                 "ticket_id": ticket_id,
                 "sender": "customer",
                 "message": req.message,
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
             }
         ).execute()
 
@@ -935,7 +1014,7 @@ def reply_to_existing_ticket(
                 "message": answer,
                 "confidence": 0.95,
                 "success": True,
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
             }
         ).execute()
 
@@ -1039,7 +1118,7 @@ def rate_ai_response(
                     "message_id": req.message_id,
                     "user_id": user_id,
                     "rating": req.rating,
-                    "created_at": datetime.utcnow().isoformat(),
+                    "created_at": datetime.now(timezone.utc).isoformat(),
                 }
             ).execute()
             logger.info(f"Created rating for message {req.message_id} by user {user_id}")
@@ -1118,13 +1197,13 @@ def escalate_to_human(
                 "ticket_id": ticket_id,
                 "user_id": user_id,
                 "status": "pending",
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
             }
         ).execute()
         
         # Update ticket status
         supabase.table("tickets").update(
-            {"status": "human_assigned", "updated_at": datetime.utcnow().isoformat()}
+            {"status": "human_assigned", "updated_at": datetime.now(timezone.utc).isoformat()}
         ).eq("id", ticket_id).execute()
         
         # Add system message
@@ -1137,7 +1216,7 @@ def escalate_to_human(
                 "ticket_id": ticket_id,
                 "sender": "system",
                 "message": escalation_message,
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
             }
         ).execute()
         
@@ -1294,6 +1373,9 @@ def admin_get_all_tickets(
         
         query = supabase.table("tickets").select("*", count="exact")
         
+        # Exclude deleted tickets by default
+        query = query.eq("is_deleted", False)
+        
         # Apply filters
         if status:
             query = query.eq("status", status)
@@ -1387,6 +1469,9 @@ def get_assigned_tickets(
         admin_email = current_admin["email"]
         query = supabase.table("tickets").select("*", count="exact").eq("assigned_to", admin_email)
         
+        # Exclude deleted tickets by default
+        query = query.eq("is_deleted", False)
+        
         # Apply filters
         if status:
             query = query.eq("status", status)
@@ -1476,6 +1561,9 @@ def get_customer_tickets(
         
         user_id = current_user["id"]
         query = supabase.table("tickets").select("*", count="exact").eq("user_id", user_id)
+        
+        # Exclude deleted tickets by default
+        query = query.eq("is_deleted", False)
         
         # Apply filters
         if status:
@@ -1688,7 +1776,7 @@ def update_ticket_priority(
         # Update priority and SLA
         update_dict = {
             "priority": req.priority,
-            "updated_at": datetime.utcnow().isoformat()
+            "updated_at": datetime.now(timezone.utc).isoformat()
         }
         if sla_id:
             update_dict["sla_id"] = sla_id
@@ -2002,8 +2090,8 @@ def create_time_entry(
             "description": req.description,
             "entry_type": req.entry_type,
             "billable": req.billable,
-            "created_at": datetime.utcnow().isoformat(),
-            "updated_at": datetime.utcnow().isoformat()
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat()
         }
         
         result = (
@@ -2133,7 +2221,7 @@ def admin_reply_to_ticket(
                 "ticket_id": ticket_id,
                 "sender": "admin",
                 "message": req.message,
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
             }
         ).execute()
         
@@ -2219,7 +2307,7 @@ def assign_ticket_to_admin(
             {
                 "assigned_to": req.admin_email.lower(),
                 "status": "human_assigned",
-                "updated_at": datetime.utcnow().isoformat(),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
             }
         ).eq("id", ticket_id).execute()
         
@@ -2229,7 +2317,7 @@ def assign_ticket_to_admin(
                 "ticket_id": ticket_id,
                 "sender": "system",
                 "message": f"Ticket assigned to {req.admin_email} by {current_admin['email']}",
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
             }
         ).execute()
         
@@ -2295,6 +2383,321 @@ def close_ticket(
     except Exception as e:
         logger.error(f"Error in close_ticket: {e}", exc_info=True)
         raise
+
+
+@app.post("/admin/tickets/delete")
+def delete_tickets(
+    req: DeleteTicketsRequest,
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Soft delete multiple tickets (move to trash). Only closed tickets can be deleted."""
+    try:
+        if supabase is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not configured",
+            )
+        
+        if not req.ticket_ids:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No ticket IDs provided"
+            )
+        
+        # Verify all tickets exist and are closed
+        tickets_res = (
+            supabase.table("tickets")
+            .select("id, status, is_deleted")
+            .in_("id", req.ticket_ids)
+            .execute()
+        )
+        
+        if not tickets_res.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No tickets found"
+            )
+        
+        found_ids = {t["id"] for t in tickets_res.data}
+        not_found = set(req.ticket_ids) - found_ids
+        if not_found:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Tickets not found: {', '.join(not_found)}"
+            )
+        
+        # Check if any tickets are not closed
+        not_closed = [t for t in tickets_res.data if t.get("status") != "closed"]
+        if not_closed:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Cannot delete tickets that are not closed. Found {len(not_closed)} open/assigned ticket(s)."
+            )
+        
+        # Check if any tickets are already deleted
+        already_deleted = [t for t in tickets_res.data if t.get("is_deleted", False)]
+        if already_deleted:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Some tickets are already deleted: {len(already_deleted)} ticket(s)"
+            )
+        
+        # Soft delete tickets
+        now = datetime.utcnow().isoformat()
+        result = (
+            supabase.table("tickets")
+            .update({
+                "is_deleted": True,
+                "deleted_at": now,
+                "updated_at": now
+            })
+            .in_("id", req.ticket_ids)
+            .execute()
+        )
+        
+        logger.info(f"Deleted {len(req.ticket_ids)} tickets by admin {current_admin['email']}")
+        
+        return {
+            "success": True,
+            "message": f"Successfully deleted {len(req.ticket_ids)} ticket(s)",
+            "deleted_count": len(req.ticket_ids)
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in delete_tickets: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete tickets",
+        )
+
+
+@app.get("/admin/tickets/trash")
+def get_trash_tickets(
+    page: int = Query(default=1, ge=1, description="Page number (1-indexed)"),
+    page_size: int = Query(default=10, ge=1, le=100, description="Number of items per page"),
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Get all deleted tickets (trash)."""
+    try:
+        if supabase is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not configured",
+            )
+        
+        query = (
+            supabase.table("tickets")
+            .select("*", count="exact")
+            .eq("is_deleted", True)
+            .order("deleted_at", desc=True)
+        )
+        
+        # Calculate pagination
+        total_res = query.execute()
+        total_count = total_res.count if hasattr(total_res, 'count') else len(total_res.data)
+        total_pages = (total_count + page_size - 1) // page_size if total_count > 0 else 0
+        skip = (page - 1) * page_size
+        
+        tickets_res = query.range(skip, skip + page_size - 1).execute()
+        tickets = tickets_res.data if tickets_res.data else []
+        
+        # Calculate days until permanent deletion (30 days)
+        now = datetime.now(timezone.utc)
+        for ticket in tickets:
+            deleted_at_str = ticket.get("deleted_at")
+            if deleted_at_str:
+                if isinstance(deleted_at_str, str):
+                    if deleted_at_str.endswith('Z'):
+                        deleted_at_str = deleted_at_str.replace('Z', '+00:00')
+                    elif '+' not in deleted_at_str and 'Z' not in deleted_at_str:
+                        deleted_at_str = deleted_at_str + '+00:00'
+                    deleted_at = datetime.fromisoformat(deleted_at_str)
+                else:
+                    deleted_at = deleted_at_str
+                
+                if deleted_at.tzinfo is None:
+                    deleted_at = deleted_at.replace(tzinfo=timezone.utc)
+                
+                days_until_deletion = 30 - (now - deleted_at).days
+                ticket["days_until_permanent_deletion"] = max(0, days_until_deletion)
+        
+        return {
+            "tickets": tickets,
+            "pagination": {
+                "page": page,
+                "page_size": page_size,
+                "total_count": total_count,
+                "total_pages": total_pages,
+                "has_next": page < total_pages,
+                "has_prev": page > 1
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in get_trash_tickets: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to get trash tickets",
+        )
+
+
+@app.post("/admin/tickets/restore")
+def restore_tickets(
+    req: RestoreTicketsRequest,
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Restore tickets from trash."""
+    try:
+        if supabase is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not configured",
+            )
+        
+        if not req.ticket_ids:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No ticket IDs provided"
+            )
+        
+        # Verify all tickets exist and are deleted
+        tickets_res = (
+            supabase.table("tickets")
+            .select("id, is_deleted")
+            .in_("id", req.ticket_ids)
+            .execute()
+        )
+        
+        if not tickets_res.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No tickets found"
+            )
+        
+        found_ids = {t["id"] for t in tickets_res.data}
+        not_found = set(req.ticket_ids) - found_ids
+        if not_found:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Tickets not found: {', '.join(not_found)}"
+            )
+        
+        # Check if any tickets are not deleted
+        not_deleted = [t for t in tickets_res.data if not t.get("is_deleted", False)]
+        if not_deleted:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Some tickets are not in trash: {len(not_deleted)} ticket(s)"
+            )
+        
+        # Restore tickets
+        now = datetime.utcnow().isoformat()
+        result = (
+            supabase.table("tickets")
+            .update({
+                "is_deleted": False,
+                "deleted_at": None,
+                "updated_at": now
+            })
+            .in_("id", req.ticket_ids)
+            .execute()
+        )
+        
+        logger.info(f"Restored {len(req.ticket_ids)} tickets by admin {current_admin['email']}")
+        
+        return {
+            "success": True,
+            "message": f"Successfully restored {len(req.ticket_ids)} ticket(s)",
+            "restored_count": len(req.ticket_ids)
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in restore_tickets: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to restore tickets",
+        )
+
+
+@app.delete("/admin/tickets/trash")
+def permanently_delete_tickets(
+    ticket_ids: list[str] = Query(..., description="List of ticket IDs to permanently delete"),
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Permanently delete tickets from trash. This action cannot be undone."""
+    try:
+        if supabase is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not configured",
+            )
+        
+        if not ticket_ids:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No ticket IDs provided"
+            )
+        
+        # Verify all tickets exist and are deleted
+        tickets_res = (
+            supabase.table("tickets")
+            .select("id, is_deleted")
+            .in_("id", ticket_ids)
+            .execute()
+        )
+        
+        if not tickets_res.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No tickets found"
+            )
+        
+        found_ids = {t["id"] for t in tickets_res.data}
+        not_found = set(ticket_ids) - found_ids
+        if not_found:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Tickets not found: {', '.join(not_found)}"
+            )
+        
+        # Check if any tickets are not deleted
+        not_deleted = [t for t in tickets_res.data if not t.get("is_deleted", False)]
+        if not_deleted:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Cannot permanently delete tickets that are not in trash: {len(not_deleted)} ticket(s)"
+            )
+        
+        # Permanently delete tickets (cascade will handle related records)
+        result = (
+            supabase.table("tickets")
+            .delete()
+            .in_("id", ticket_ids)
+            .execute()
+        )
+        
+        logger.info(f"Permanently deleted {len(ticket_ids)} tickets by admin {current_admin['email']}")
+        
+        return {
+            "success": True,
+            "message": f"Successfully permanently deleted {len(ticket_ids)} ticket(s)",
+            "deleted_count": len(ticket_ids)
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in permanently_delete_tickets: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to permanently delete tickets",
+        )
 
 
 # ---------------------------
@@ -2662,7 +3065,7 @@ def create_email_account(
             "is_active": req.is_active,
             "is_default": req.is_default,
             "created_by": current_admin["id"],
-            "updated_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
         }
         
         # Check if account exists
@@ -2809,10 +3212,34 @@ def send_email_from_ticket(
         if not account_id:
             default_account = email_service.get_default_email_account()
             if not default_account:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="No email account configured. Please set up an email account first."
+                # Check if there are any accounts at all
+                all_accounts = (
+                    supabase.table("email_accounts")
+                    .select("id, email, is_active, is_default")
+                    .execute()
                 )
+                if not all_accounts.data:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="No email account configured. Please set up an email account first via Admin Portal → Email Accounts."
+                    )
+                else:
+                    # There are accounts but none are active/default
+                    inactive_accounts = [acc for acc in all_accounts.data if not acc.get("is_active")]
+                    no_default_accounts = [acc for acc in all_accounts.data if not acc.get("is_default")]
+                    
+                    error_msg = "No active email account found. "
+                    if inactive_accounts:
+                        error_msg += f"Found {len(inactive_accounts)} inactive account(s). "
+                    if no_default_accounts and len(no_default_accounts) == len(all_accounts.data):
+                        error_msg += "Please mark at least one account as 'Active' and 'Default' in Admin Portal → Email Accounts."
+                    else:
+                        error_msg += "Please activate an email account and set it as default."
+                    
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=error_msg
+                    )
             account_id = default_account["id"]
         
         # Send email
@@ -2849,7 +3276,7 @@ def send_email_from_ticket(
             "direction": "outbound",
             "has_attachments": False,
             "sent_at": datetime.utcnow().isoformat(),
-            "created_at": datetime.utcnow().isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
         }
         
         email_result = supabase.table("email_messages").insert(email_message_data).execute()
@@ -2860,7 +3287,7 @@ def send_email_from_ticket(
                 "ticket_id": ticket_id,
                 "email_message_id": email_result.data[0]["id"],
                 "thread_position": 1,  # TODO: Calculate proper position
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
             }).execute()
         
         logger.info(f"Email sent from ticket {ticket_id} by {current_user['email']}")
@@ -2950,7 +3377,7 @@ async def receive_email_webhook(
                 "priority": "medium",
                 "user_id": None,  # Will be linked if user exists
                 "source": "email",
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
             }
             
             # Try to find user by email
@@ -2998,7 +3425,7 @@ async def receive_email_webhook(
             "direction": "inbound",
             "has_attachments": len(parsed.get("attachments", [])) > 0,
             "received_at": datetime.utcnow().isoformat(),
-            "created_at": datetime.utcnow().isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
         }
         
         email_result = supabase.table("email_messages").insert(email_message_data).execute()
@@ -3018,7 +3445,7 @@ async def receive_email_webhook(
                 "ticket_id": ticket_id,
                 "email_message_id": email_result.data[0]["id"],
                 "thread_position": thread_count + 1,
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
             }).execute()
         
         # Create message in ticket
@@ -3027,7 +3454,7 @@ async def receive_email_webhook(
             "ticket_id": ticket_id,
             "sender": "customer" if email_result.data else "system",
             "message": f"Email received from {from_email}:\n\n{message_text}",
-            "created_at": datetime.utcnow().isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
         }).execute()
         
         logger.info(f"Email received and linked to ticket {ticket_id}")
@@ -3167,7 +3594,7 @@ def create_email_template(
             "template_type": req.template_type,
             "variables": json.dumps(req.variables) if req.variables else None,
             "is_active": req.is_active,
-            "updated_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
         }
         
         # Check if template exists
@@ -3240,3 +3667,1215 @@ def list_email_templates(
     except Exception as e:
         logger.error(f"Error in list_email_templates: {e}", exc_info=True)
         raise
+
+
+# ---------------------------
+# 🏢 ORGANIZATION ENDPOINTS (Super Admin Only)
+# ---------------------------
+
+@app.post("/admin/organizations")
+def create_organization(
+    req: OrganizationRequest,
+    current_super_admin: dict = Depends(get_current_super_admin)
+):
+    """Create a new organization. Only super admins can create organizations."""
+    try:
+        if supabase is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not configured",
+            )
+        
+        # Validate slug format
+        if not re.match(r'^[a-z0-9-]+$', req.slug):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Slug must contain only lowercase letters, numbers, and hyphens"
+            )
+        
+        # Check if slug already exists
+        existing = (
+            supabase.table("organizations")
+            .select("id")
+            .eq("slug", req.slug)
+            .execute()
+        )
+        if existing.data:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Organization with this slug already exists"
+            )
+        
+        # Create organization
+        org_data = {
+            "name": req.name,
+            "slug": req.slug,
+            "description": req.description,
+            "super_admin_id": current_super_admin["id"],
+            "is_active": True,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat()
+        }
+        
+        result = (
+            supabase.table("organizations")
+            .insert(org_data)
+            .execute()
+        )
+        
+        # Add super admin as organization member
+        if result.data:
+            supabase.table("organization_members").insert({
+                "organization_id": result.data[0]["id"],
+                "user_id": current_super_admin["id"],
+                "role": "admin",
+                "joined_at": datetime.utcnow().isoformat(),
+                "is_active": True,
+                "created_at": datetime.utcnow().isoformat()
+            }).execute()
+        
+        logger.info(f"Created organization: {req.slug} by {current_super_admin['email']}")
+        return {"success": True, "organization": result.data[0] if result.data else None}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in create_organization: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create organization",
+        )
+
+
+@app.get("/admin/organizations")
+def list_organizations(
+    current_super_admin: dict = Depends(get_current_super_admin)
+):
+    """List all organizations. Only super admins can list organizations."""
+    try:
+        if supabase is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not configured",
+            )
+        
+        # Get organizations where user is super admin
+        result = (
+            supabase.table("organizations")
+            .select("*")
+            .eq("super_admin_id", current_super_admin["id"])
+            .order("created_at", desc=True)
+            .execute()
+        )
+        
+        return {"organizations": result.data if result.data else []}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in list_organizations: {e}", exc_info=True)
+        raise
+
+
+@app.post("/admin/organizations/{organization_id}/invite")
+def invite_member(
+    organization_id: str,
+    req: InviteMemberRequest,
+    current_super_admin: dict = Depends(get_current_super_admin)
+):
+    """Invite a team member to an organization. Only super admins can invite members."""
+    try:
+        if supabase is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not configured",
+            )
+        
+        # Verify organization exists and user is super admin
+        org_res = (
+            supabase.table("organizations")
+            .select("*")
+            .eq("id", organization_id)
+            .eq("super_admin_id", current_super_admin["id"])
+            .limit(1)
+            .execute()
+        )
+        if not org_res.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Organization not found or you don't have permission"
+            )
+        
+        # Validate role
+        if req.role not in ["admin", "viewer"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Role must be 'admin' or 'viewer'"
+            )
+        
+        # Find or create user
+        user_res = (
+            supabase.table("users")
+            .select("id, email, role")
+            .eq("email", req.email.lower())
+            .limit(1)
+            .execute()
+        )
+        
+        if not user_res.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found. User must register first."
+            )
+        
+        user = user_res.data[0]
+        user_id = user["id"]
+        
+        # Check if user is already a member
+        existing_member = (
+            supabase.table("organization_members")
+            .select("id")
+            .eq("organization_id", organization_id)
+            .eq("user_id", user_id)
+            .execute()
+        )
+        if existing_member.data:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="User is already a member of this organization"
+            )
+        
+        # Add member
+        member_data = {
+            "organization_id": organization_id,
+            "user_id": user_id,
+            "role": req.role,
+            "invited_by": current_super_admin["id"],
+            "invited_at": datetime.utcnow().isoformat(),
+            "is_active": True,
+            "created_at": datetime.utcnow().isoformat()
+        }
+        
+        result = (
+            supabase.table("organization_members")
+            .insert(member_data)
+            .execute()
+        )
+        
+        logger.info(f"Invited {req.email} to organization {organization_id} by {current_super_admin['email']}")
+        return {"success": True, "member": result.data[0] if result.data else None}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in invite_member: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to invite member",
+        )
+
+
+@app.get("/admin/organizations/{organization_id}/members")
+def list_organization_members(
+    organization_id: str,
+    current_super_admin: dict = Depends(get_current_super_admin)
+):
+    """List all members of an organization. Only super admins can list members."""
+    try:
+        if supabase is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not configured",
+            )
+        
+        # Verify organization exists and user is super admin
+        org_res = (
+            supabase.table("organizations")
+            .select("id")
+            .eq("id", organization_id)
+            .eq("super_admin_id", current_super_admin["id"])
+            .limit(1)
+            .execute()
+        )
+        if not org_res.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Organization not found or you don't have permission"
+            )
+        
+        # Get members with user details
+        result = (
+            supabase.table("organization_members")
+            .select("*, users(email, name, role)")
+            .eq("organization_id", organization_id)
+            .order("created_at", desc=True)
+            .execute()
+        )
+        
+        return {"members": result.data if result.data else []}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in list_organization_members: {e}", exc_info=True)
+        raise
+
+
+@app.delete("/admin/organizations/{organization_id}/members/{member_id}")
+def remove_member(
+    organization_id: str,
+    member_id: str,
+    current_super_admin: dict = Depends(get_current_super_admin)
+):
+    """Remove a member from an organization. Only super admins can remove members."""
+    try:
+        if supabase is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not configured",
+            )
+        
+        # Verify organization exists and user is super admin
+        org_res = (
+            supabase.table("organizations")
+            .select("id")
+            .eq("id", organization_id)
+            .eq("super_admin_id", current_super_admin["id"])
+            .limit(1)
+            .execute()
+        )
+        if not org_res.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Organization not found or you don't have permission"
+            )
+        
+        # Verify member exists
+        member_res = (
+            supabase.table("organization_members")
+            .select("*")
+            .eq("id", member_id)
+            .eq("organization_id", organization_id)
+            .limit(1)
+            .execute()
+        )
+        if not member_res.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Member not found"
+            )
+        
+        # Remove member
+        supabase.table("organization_members").delete().eq("id", member_id).execute()
+        
+        logger.info(f"Removed member {member_id} from organization {organization_id} by {current_super_admin['email']}")
+        return {"success": True, "message": "Member removed successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in remove_member: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to remove member",
+        )
+
+
+# ---------------------------
+# 🎯 ROUTING RULES ENDPOINTS
+# ---------------------------
+
+@app.post("/admin/routing-rules")
+def create_routing_rule(
+    req: RoutingRuleRequest,
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Create a new routing rule."""
+    try:
+        if supabase is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not configured",
+            )
+        
+        # Get user's organization (if any)
+        org_member_res = (
+            supabase.table("organization_members")
+            .select("organization_id")
+            .eq("user_id", current_admin["id"])
+            .eq("is_active", True)
+            .limit(1)
+            .execute()
+        )
+        
+        organization_id = None
+        if org_member_res.data:
+            organization_id = org_member_res.data[0]["organization_id"]
+        
+        # Validate action_type
+        valid_actions = ["assign_to_agent", "assign_to_group", "set_priority", "add_tag", "set_category"]
+        if req.action_type not in valid_actions:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Action type must be one of: {', '.join(valid_actions)}"
+            )
+        
+        rule_data = {
+            "organization_id": organization_id,
+            "name": req.name,
+            "description": req.description,
+            "priority": req.priority,
+            "is_active": req.is_active,
+            "conditions": json.dumps(req.conditions),
+            "action_type": req.action_type,
+            "action_value": req.action_value,
+            "created_by": current_admin["id"],
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat()
+        }
+        
+        result = (
+            supabase.table("routing_rules")
+            .insert(rule_data)
+            .execute()
+        )
+        
+        logger.info(f"Created routing rule: {req.name} by {current_admin['email']}")
+        return {"success": True, "rule": result.data[0] if result.data else None}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in create_routing_rule: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create routing rule",
+        )
+
+
+@app.get("/admin/routing-rules")
+def list_routing_rules(
+    current_admin: dict = Depends(get_current_admin)
+):
+    """List all routing rules for the admin's organization."""
+    try:
+        if supabase is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not configured",
+            )
+        
+        # Get user's organization (if any)
+        org_member_res = (
+            supabase.table("organization_members")
+            .select("organization_id")
+            .eq("user_id", current_admin["id"])
+            .eq("is_active", True)
+            .limit(1)
+            .execute()
+        )
+        
+        query = supabase.table("routing_rules").select("*")
+        
+        if org_member_res.data:
+            organization_id = org_member_res.data[0]["organization_id"]
+            query = query.eq("organization_id", organization_id)
+        else:
+            # If no organization, return empty list or global rules
+            query = query.is_("organization_id", "null")
+        
+        result = query.order("priority", desc=True).execute()
+        
+        # Parse conditions JSON
+        rules = result.data if result.data else []
+        for rule in rules:
+            if isinstance(rule.get("conditions"), str):
+                try:
+                    rule["conditions"] = json.loads(rule["conditions"])
+                except:
+                    rule["conditions"] = {}
+        
+        return {"rules": rules}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in list_routing_rules: {e}", exc_info=True)
+        raise
+
+
+@app.delete("/admin/routing-rules/{rule_id}")
+def delete_routing_rule(
+    rule_id: str,
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Delete a routing rule."""
+    try:
+        if supabase is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not configured",
+            )
+        
+        # Verify rule exists and user has access
+        rule_res = (
+            supabase.table("routing_rules")
+            .select("*")
+            .eq("id", rule_id)
+            .limit(1)
+            .execute()
+        )
+        if not rule_res.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Routing rule not found"
+            )
+        
+        # Check organization access
+        rule = rule_res.data[0]
+        if rule.get("organization_id"):
+            org_member_res = (
+                supabase.table("organization_members")
+                .select("id")
+                .eq("organization_id", rule["organization_id"])
+                .eq("user_id", current_admin["id"])
+                .eq("is_active", True)
+                .limit(1)
+                .execute()
+            )
+            if not org_member_res.data:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="You don't have access to this routing rule"
+                )
+        
+        supabase.table("routing_rules").delete().eq("id", rule_id).execute()
+        
+        logger.info(f"Deleted routing rule {rule_id} by {current_admin['email']}")
+        return {"success": True, "message": "Routing rule deleted successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in delete_routing_rule: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete routing rule",
+        )
+
+
+# ---------------------------
+# 🏷️ TAGS & CATEGORIES ENDPOINTS
+# ---------------------------
+
+@app.post("/admin/tags")
+def create_tag(
+    req: TagRequest,
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Create a new tag."""
+    try:
+        if supabase is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not configured",
+            )
+        
+        # Get user's organization (if any)
+        org_member_res = (
+            supabase.table("organization_members")
+            .select("organization_id")
+            .eq("user_id", current_admin["id"])
+            .eq("is_active", True)
+            .limit(1)
+            .execute()
+        )
+        
+        organization_id = None
+        if org_member_res.data:
+            organization_id = org_member_res.data[0]["organization_id"]
+        
+        tag_data = {
+            "organization_id": organization_id,
+            "name": req.name,
+            "color": req.color,
+            "description": req.description,
+            "created_by": current_admin["id"],
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat()
+        }
+        
+        result = (
+            supabase.table("tags")
+            .insert(tag_data)
+            .execute()
+        )
+        
+        logger.info(f"Created tag: {req.name} by {current_admin['email']}")
+        return {"success": True, "tag": result.data[0] if result.data else None}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in create_tag: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create tag",
+        )
+
+
+@app.get("/admin/tags")
+def list_tags(
+    current_admin: dict = Depends(get_current_admin)
+):
+    """List all tags for the admin's organization."""
+    try:
+        if supabase is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not configured",
+            )
+        
+        # Get user's organization (if any)
+        org_member_res = (
+            supabase.table("organization_members")
+            .select("organization_id")
+            .eq("user_id", current_admin["id"])
+            .eq("is_active", True)
+            .limit(1)
+            .execute()
+        )
+        
+        query = supabase.table("tags").select("*")
+        
+        if org_member_res.data:
+            organization_id = org_member_res.data[0]["organization_id"]
+            query = query.or_(f"organization_id.eq.{organization_id},organization_id.is.null")
+        else:
+            query = query.is_("organization_id", "null")
+        
+        result = query.order("name", desc=False).execute()
+        
+        return {"tags": result.data if result.data else []}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in list_tags: {e}", exc_info=True)
+        raise
+
+
+@app.put("/admin/tags/{tag_id}")
+def update_tag(
+    tag_id: str,
+    req: TagRequest,
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Update a tag."""
+    try:
+        if supabase is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not configured",
+            )
+        
+        # Verify tag exists and user has access
+        tag_res = (
+            supabase.table("tags")
+            .select("*")
+            .eq("id", tag_id)
+            .limit(1)
+            .execute()
+        )
+        if not tag_res.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Tag not found"
+            )
+        
+        tag = tag_res.data[0]
+        
+        # Check organization access
+        if tag.get("organization_id"):
+            org_member_res = (
+                supabase.table("organization_members")
+                .select("id")
+                .eq("organization_id", tag["organization_id"])
+                .eq("user_id", current_admin["id"])
+                .eq("is_active", True)
+                .limit(1)
+                .execute()
+            )
+            if not org_member_res.data:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="You don't have access to this tag"
+                )
+        
+        # Update tag
+        update_data = {
+            "name": req.name,
+            "color": req.color,
+            "description": req.description,
+            "updated_at": datetime.now(timezone.utc).isoformat()
+        }
+        
+        result = (
+            supabase.table("tags")
+            .update(update_data)
+            .eq("id", tag_id)
+            .execute()
+        )
+        
+        logger.info(f"Updated tag {tag_id} by {current_admin['email']}")
+        return {"success": True, "tag": result.data[0] if result.data else None}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in update_tag: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update tag",
+        )
+
+
+@app.delete("/admin/tags/{tag_id}")
+def delete_tag(
+    tag_id: str,
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Delete a tag."""
+    try:
+        if supabase is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not configured",
+            )
+        
+        # Verify tag exists and user has access
+        tag_res = (
+            supabase.table("tags")
+            .select("*")
+            .eq("id", tag_id)
+            .limit(1)
+            .execute()
+        )
+        if not tag_res.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Tag not found"
+            )
+        
+        tag = tag_res.data[0]
+        
+        # Check organization access
+        if tag.get("organization_id"):
+            org_member_res = (
+                supabase.table("organization_members")
+                .select("id")
+                .eq("organization_id", tag["organization_id"])
+                .eq("user_id", current_admin["id"])
+                .eq("is_active", True)
+                .limit(1)
+                .execute()
+            )
+            if not org_member_res.data:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="You don't have access to this tag"
+                )
+        
+        # Delete tag (cascade will handle ticket_tags)
+        supabase.table("tags").delete().eq("id", tag_id).execute()
+        
+        logger.info(f"Deleted tag {tag_id} by {current_admin['email']}")
+        return {"success": True, "message": "Tag deleted successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in delete_tag: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete tag",
+        )
+
+
+@app.post("/ticket/{ticket_id}/tags")
+def add_tags_to_ticket(
+    ticket_id: str,
+    req: TicketTagsRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """Add tags to a ticket."""
+    try:
+        if supabase is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not configured",
+            )
+        
+        # Verify ticket exists and user has access
+        ticket_res = (
+            supabase.table("tickets")
+            .select("*")
+            .eq("id", ticket_id)
+            .limit(1)
+            .execute()
+        )
+        if not ticket_res.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Ticket not found"
+            )
+        
+        ticket = ticket_res.data[0]
+        user_role = current_user["role"]
+        
+        # Verify access
+        if user_role == "customer" and ticket.get("user_id") != current_user["id"]:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You don't have access to this ticket"
+            )
+        
+        # Add tags
+        added_tags = []
+        for tag_id in req.tag_ids:
+            # Check if tag already exists on ticket
+            existing = (
+                supabase.table("ticket_tags")
+                .select("id")
+                .eq("ticket_id", ticket_id)
+                .eq("tag_id", tag_id)
+                .execute()
+            )
+            if not existing.data:
+                supabase.table("ticket_tags").insert({
+                    "ticket_id": ticket_id,
+                    "tag_id": tag_id,
+                    "added_by": current_user["id"],
+                    "created_at": datetime.utcnow().isoformat()
+                }).execute()
+                added_tags.append(tag_id)
+        
+        logger.info(f"Added {len(added_tags)} tag(s) to ticket {ticket_id} by {current_user['email']}")
+        return {"success": True, "added_tags": added_tags}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in add_tags_to_ticket: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to add tags",
+        )
+
+
+@app.delete("/ticket/{ticket_id}/tags/{tag_id}")
+def remove_tag_from_ticket(
+    ticket_id: str,
+    tag_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Remove a tag from a ticket."""
+    try:
+        if supabase is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not configured",
+            )
+        
+        # Verify ticket exists and user has access
+        ticket_res = (
+            supabase.table("tickets")
+            .select("*")
+            .eq("id", ticket_id)
+            .limit(1)
+            .execute()
+        )
+        if not ticket_res.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Ticket not found"
+            )
+        
+        ticket = ticket_res.data[0]
+        user_role = current_user["role"]
+        
+        # Verify access
+        if user_role == "customer" and ticket.get("user_id") != current_user["id"]:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You don't have access to this ticket"
+            )
+        
+        # Remove tag
+        supabase.table("ticket_tags").delete().eq("ticket_id", ticket_id).eq("tag_id", tag_id).execute()
+        
+        logger.info(f"Removed tag {tag_id} from ticket {ticket_id} by {current_user['email']}")
+        return {"success": True, "message": "Tag removed successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in remove_tag_from_ticket: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to remove tag",
+        )
+
+
+@app.get("/ticket/{ticket_id}/tags")
+def get_ticket_tags(
+    ticket_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get all tags for a ticket."""
+    try:
+        if supabase is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not configured",
+            )
+        
+        # Verify ticket exists and user has access
+        ticket_res = (
+            supabase.table("tickets")
+            .select("*")
+            .eq("id", ticket_id)
+            .limit(1)
+            .execute()
+        )
+        if not ticket_res.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Ticket not found"
+            )
+        
+        ticket = ticket_res.data[0]
+        user_role = current_user["role"]
+        
+        # Verify access
+        if user_role == "customer" and ticket.get("user_id") != current_user["id"]:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You don't have access to this ticket"
+            )
+        
+        # Get tags
+        result = (
+            supabase.table("ticket_tags")
+            .select("*, tags(*)")
+            .eq("ticket_id", ticket_id)
+            .execute()
+        )
+        
+        tags = []
+        if result.data:
+            for item in result.data:
+                if item.get("tags"):
+                    tags.append(item["tags"])
+        
+        return {"tags": tags}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in get_ticket_tags: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to get tags",
+        )
+
+
+@app.post("/admin/categories")
+def create_category(
+    req: CategoryRequest,
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Create a new category."""
+    try:
+        if supabase is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not configured",
+            )
+        
+        # Get user's organization (if any)
+        org_member_res = (
+            supabase.table("organization_members")
+            .select("organization_id")
+            .eq("user_id", current_admin["id"])
+            .eq("is_active", True)
+            .limit(1)
+            .execute()
+        )
+        
+        organization_id = None
+        if org_member_res.data:
+            organization_id = org_member_res.data[0]["organization_id"]
+        
+        category_data = {
+            "organization_id": organization_id,
+            "name": req.name,
+            "color": req.color,
+            "description": req.description,
+            "created_by": current_admin["id"],
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat()
+        }
+        
+        result = (
+            supabase.table("categories")
+            .insert(category_data)
+            .execute()
+        )
+        
+        logger.info(f"Created category: {req.name} by {current_admin['email']}")
+        return {"success": True, "category": result.data[0] if result.data else None}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in create_category: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create category",
+        )
+
+
+@app.get("/admin/categories")
+def list_categories(
+    current_admin: dict = Depends(get_current_admin)
+):
+    """List all categories for the admin's organization."""
+    try:
+        if supabase is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not configured",
+            )
+        
+        # Get user's organization (if any)
+        org_member_res = (
+            supabase.table("organization_members")
+            .select("organization_id")
+            .eq("user_id", current_admin["id"])
+            .eq("is_active", True)
+            .limit(1)
+            .execute()
+        )
+        
+        query = supabase.table("categories").select("*")
+        
+        if org_member_res.data:
+            organization_id = org_member_res.data[0]["organization_id"]
+            query = query.or_(f"organization_id.eq.{organization_id},organization_id.is.null")
+        else:
+            query = query.is_("organization_id", "null")
+        
+        result = query.order("name", desc=False).execute()
+        
+        return {"categories": result.data if result.data else []}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in list_categories: {e}", exc_info=True)
+        raise
+
+
+@app.put("/admin/categories/{category_id}")
+def update_category(
+    category_id: str,
+    req: CategoryRequest,
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Update a category."""
+    try:
+        if supabase is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not configured",
+            )
+        
+        # Verify category exists and user has access
+        category_res = (
+            supabase.table("categories")
+            .select("*")
+            .eq("id", category_id)
+            .limit(1)
+            .execute()
+        )
+        if not category_res.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Category not found"
+            )
+        
+        category = category_res.data[0]
+        
+        # Check organization access
+        if category.get("organization_id"):
+            org_member_res = (
+                supabase.table("organization_members")
+                .select("id")
+                .eq("organization_id", category["organization_id"])
+                .eq("user_id", current_admin["id"])
+                .eq("is_active", True)
+                .limit(1)
+                .execute()
+            )
+            if not org_member_res.data:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="You don't have access to this category"
+                )
+        
+        # Update category
+        update_data = {
+            "name": req.name,
+            "color": req.color,
+            "description": req.description,
+            "updated_at": datetime.now(timezone.utc).isoformat()
+        }
+        
+        result = (
+            supabase.table("categories")
+            .update(update_data)
+            .eq("id", category_id)
+            .execute()
+        )
+        
+        logger.info(f"Updated category {category_id} by {current_admin['email']}")
+        return {"success": True, "category": result.data[0] if result.data else None}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in update_category: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update category",
+        )
+
+
+@app.delete("/admin/categories/{category_id}")
+def delete_category(
+    category_id: str,
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Delete a category."""
+    try:
+        if supabase is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not configured",
+            )
+        
+        # Verify category exists and user has access
+        category_res = (
+            supabase.table("categories")
+            .select("*")
+            .eq("id", category_id)
+            .limit(1)
+            .execute()
+        )
+        if not category_res.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Category not found"
+            )
+        
+        category = category_res.data[0]
+        
+        # Check organization access
+        if category.get("organization_id"):
+            org_member_res = (
+                supabase.table("organization_members")
+                .select("id")
+                .eq("organization_id", category["organization_id"])
+                .eq("user_id", current_admin["id"])
+                .eq("is_active", True)
+                .limit(1)
+                .execute()
+            )
+            if not org_member_res.data:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="You don't have access to this category"
+                )
+        
+        # Delete category
+        supabase.table("categories").delete().eq("id", category_id).execute()
+        
+        logger.info(f"Deleted category {category_id} by {current_admin['email']}")
+        return {"success": True, "message": "Category deleted successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in delete_category: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete category",
+        )
+
+
+@app.put("/ticket/{ticket_id}/category")
+def set_ticket_category(
+    ticket_id: str,
+    req: TicketCategoryRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """Set category for a ticket."""
+    try:
+        if supabase is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not configured",
+            )
+        
+        # Verify ticket exists and user has access
+        ticket_res = (
+            supabase.table("tickets")
+            .select("*")
+            .eq("id", ticket_id)
+            .limit(1)
+            .execute()
+        )
+        if not ticket_res.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Ticket not found"
+            )
+        
+        ticket = ticket_res.data[0]
+        user_role = current_user["role"]
+        
+        # Verify access (only admins can set category)
+        if user_role == "customer":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only admins can set ticket category"
+            )
+        
+        # Update category
+        supabase.table("tickets").update({
+            "category": req.category,
+            "updated_at": datetime.now(timezone.utc).isoformat()
+        }).eq("id", ticket_id).execute()
+        
+        logger.info(f"Set category '{req.category}' for ticket {ticket_id} by {current_user['email']}")
+        return {"success": True, "message": "Category updated successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in set_ticket_category: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to set category",
+        )

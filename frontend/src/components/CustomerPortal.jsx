@@ -11,7 +11,7 @@ export default function CustomerPortal() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-900">
+    <div className="min-h-screen bg-bg">
       <Routes>
         <Route path="/" element={<CustomerDashboard />} />
         <Route path="/ticket/:ticketId" element={<CustomerTicketView />} />

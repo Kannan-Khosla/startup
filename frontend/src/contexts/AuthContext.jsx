@@ -99,7 +99,8 @@ export function AuthProvider({ children }) {
     logout,
     refreshUser,
     isAuthenticated: user !== null,
-    isAdmin: user?.role === 'admin',
+    isAdmin: user?.role === 'admin' || user?.role === 'super_admin',
+    isSuperAdmin: user?.role === 'super_admin',
     isCustomer: user?.role === 'customer',
   };
 
