@@ -1,11 +1,12 @@
 """Email service for sending and receiving emails via SMTP or email APIs."""
 import smtplib
+import imaplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email import encoders
 from typing import Optional, List, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import re
 import email
@@ -380,6 +381,23 @@ class EmailService:
                                 "content_type": part.get_content_type()
                             })
             
+            # Extract spam-related headers
+            headers = {}
+            spam_headers = [
+                "List-Unsubscribe",
+                "List-Unsubscribe-Post",
+                "X-Spam-Score",
+                "X-Spam-Status",
+                "X-Spam-Flag",
+                "Precedence",
+                "X-Mailer",
+                "X-Auto-Response-Suppress",
+            ]
+            for header_name in spam_headers:
+                header_value = msg.get(header_name)
+                if header_value:
+                    headers[header_name] = header_value
+            
             return {
                 "subject": subject,
                 "from_email": from_email,
@@ -391,7 +409,8 @@ class EmailService:
                 "body_text": body_text,
                 "body_html": body_html,
                 "attachments": attachments,
-                "date": msg.get("Date", "")
+                "date": msg.get("Date", ""),
+                "_headers": headers  # Internal headers for spam detection
             }
         except Exception as e:
             logger.error(f"Error parsing email: {e}", exc_info=True)
@@ -415,6 +434,177 @@ class EmailService:
         """Extract email address from 'Name <email@domain.com>' format."""
         match = re.search(r'[\w\.-]+@[\w\.-]+\.\w+', address_string)
         return match.group(0) if match else address_string.strip()
+    
+    def _get_imap_settings(self, account: Dict) -> Dict[str, Any]:
+        """Get IMAP settings for an email account, auto-detecting for common providers."""
+        email_addr = account.get("email", "").lower()
+        imap_host = account.get("imap_host")
+        imap_port = account.get("imap_port")
+        
+        # Auto-detect IMAP settings for common providers
+        if not imap_host:
+            if "@gmail.com" in email_addr:
+                imap_host = "imap.gmail.com"
+                imap_port = 993
+            elif "@outlook.com" in email_addr or "@hotmail.com" in email_addr or "@office365.com" in email_addr:
+                imap_host = "outlook.office365.com"
+                imap_port = 993
+            else:
+                # Try to use SMTP host as fallback (some providers use same host)
+                imap_host = account.get("smtp_host")
+                imap_port = 993  # Default IMAP SSL port
+        
+        # Default port if not set
+        if not imap_port:
+            imap_port = 993
+        
+        return {
+            "host": imap_host,
+            "port": imap_port,
+            "use_ssl": True  # Most modern IMAP servers use SSL
+        }
+    
+    def _parse_email_from_imap(self, raw_email: bytes) -> Dict[str, Any]:
+        """Parse email from IMAP raw bytes."""
+        try:
+            msg = email.message_from_bytes(raw_email)
+            return self.parse_email(msg.as_string())
+        except Exception as e:
+            logger.error(f"Error parsing email from IMAP: {e}", exc_info=True)
+            return {}
+    
+    def fetch_emails_imap(
+        self,
+        account: Dict,
+        since_date: Optional[datetime] = None,
+        max_emails: int = 50
+    ) -> List[Dict[str, Any]]:
+        """
+        Fetch emails from IMAP server.
+        
+        Args:
+            account: Email account dictionary
+            since_date: Only fetch emails after this date (default: last_polled_at or 7 days ago)
+            max_emails: Maximum number of emails to fetch per call
+        
+        Returns:
+            List of parsed email dictionaries
+        """
+        try:
+            imap_settings = self._get_imap_settings(account)
+            if not imap_settings.get("host"):
+                logger.error(f"No IMAP host configured for account {account.get('email')}")
+                return []
+            
+            email_addr = account.get("email")
+            smtp_username = account.get("smtp_username") or email_addr
+            smtp_password = self.decrypt_credentials(account.get("smtp_password_encrypted", ""))
+            
+            if not smtp_password:
+                logger.error(f"No password configured for IMAP account {email_addr}")
+                return []
+            
+            # Connect to IMAP server
+            if imap_settings.get("use_ssl"):
+                mail = imaplib.IMAP4_SSL(imap_settings["host"], imap_settings["port"])
+            else:
+                mail = imaplib.IMAP4(imap_settings["host"], imap_settings["port"])
+            
+            try:
+                # Login
+                mail.login(smtp_username, smtp_password)
+                
+                # Select inbox
+                mail.select("INBOX")
+                
+                # Build search criteria
+                search_criteria = "ALL"
+                if since_date:
+                    # Format date for IMAP search: DD-MMM-YYYY
+                    date_str = since_date.strftime("%d-%b-%Y")
+                    search_criteria = f'(SINCE "{date_str}")'
+                
+                # Search for emails
+                status, messages = mail.search(None, search_criteria)
+                if status != "OK":
+                    logger.warning(f"IMAP search failed for account {email_addr}")
+                    return []
+                
+                email_ids = messages[0].split()
+                
+                # Limit number of emails
+                if len(email_ids) > max_emails:
+                    email_ids = email_ids[-max_emails:]  # Get most recent emails
+                
+                fetched_emails = []
+                
+                # Fetch each email
+                for email_id in reversed(email_ids):  # Process newest first
+                    try:
+                        status, msg_data = mail.fetch(email_id, "(RFC822)")
+                        if status == "OK" and msg_data[0]:
+                            raw_email = msg_data[0][1]
+                            parsed = self._parse_email_from_imap(raw_email)
+                            if parsed:
+                                parsed["_imap_id"] = email_id.decode()  # Store for reference
+                                fetched_emails.append(parsed)
+                    except Exception as e:
+                        logger.warning(f"Error fetching email {email_id}: {e}")
+                        continue
+                
+                logger.info(f"Fetched {len(fetched_emails)} emails from {email_addr}")
+                return fetched_emails
+                
+            finally:
+                mail.close()
+                mail.logout()
+                
+        except imaplib.IMAP4.error as e:
+            logger.error(f"IMAP error for account {account.get('email')}: {e}", exc_info=True)
+            return []
+        except Exception as e:
+            logger.error(f"Error fetching emails via IMAP for {account.get('email')}: {e}", exc_info=True)
+            return []
+    
+    def test_imap_connection(self, account_id: str) -> Dict[str, Any]:
+        """Test IMAP connection for an email account."""
+        account = self.get_email_account(account_id)
+        if not account:
+            return {"success": False, "error": "Email account not found"}
+        
+        try:
+            imap_settings = self._get_imap_settings(account)
+            if not imap_settings.get("host"):
+                return {"success": False, "error": "No IMAP host configured or auto-detected"}
+            
+            email_addr = account.get("email")
+            smtp_username = account.get("smtp_username") or email_addr
+            smtp_password = self.decrypt_credentials(account.get("smtp_password_encrypted", ""))
+            
+            if not smtp_password:
+                return {"success": False, "error": "No password configured"}
+            
+            # Connect to IMAP server
+            if imap_settings.get("use_ssl"):
+                mail = imaplib.IMAP4_SSL(imap_settings["host"], imap_settings["port"])
+            else:
+                mail = imaplib.IMAP4(imap_settings["host"], imap_settings["port"])
+            
+            try:
+                mail.login(smtp_username, smtp_password)
+                mail.select("INBOX")
+                return {
+                    "success": True,
+                    "message": f"IMAP connection successful to {imap_settings['host']}:{imap_settings['port']}"
+                }
+            finally:
+                mail.close()
+                mail.logout()
+                
+        except imaplib.IMAP4.error as e:
+            return {"success": False, "error": f"IMAP error: {str(e)}"}
+        except Exception as e:
+            return {"success": False, "error": f"Connection error: {str(e)}"}
 
 
 # Global email service instance

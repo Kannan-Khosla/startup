@@ -362,6 +362,40 @@ export async function testEmailAccount(accountId) {
 }
 
 /**
+ * Test IMAP connection for an email account
+ */
+export async function testImapConnection(accountId) {
+  return apiRequest(`/admin/email-accounts/${encodeURIComponent(accountId)}/test-imap`, {
+    method: 'POST',
+  });
+}
+
+/**
+ * Enable email polling for an account
+ */
+export async function enableEmailPolling(accountId) {
+  return apiRequest(`/admin/email-accounts/${encodeURIComponent(accountId)}/enable-polling`, {
+    method: 'POST',
+  });
+}
+
+/**
+ * Disable email polling for an account
+ */
+export async function disableEmailPolling(accountId) {
+  return apiRequest(`/admin/email-accounts/${encodeURIComponent(accountId)}/disable-polling`, {
+    method: 'POST',
+  });
+}
+
+/**
+ * Get polling status for an email account
+ */
+export async function getPollingStatus(accountId) {
+  return apiRequest(`/admin/email-accounts/${encodeURIComponent(accountId)}/polling-status`);
+}
+
+/**
  * Send email from ticket
  */
 export async function sendEmailFromTicket(ticketId, emailData) {

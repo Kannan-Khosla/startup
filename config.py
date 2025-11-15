@@ -33,6 +33,16 @@ class Settings(BaseSettings):
     
     # Admin bootstrap configuration
     admin_bootstrap_key: Optional[str] = Field(default=None, description="Bootstrap key for creating first admin (only used when no admins exist)")
+    
+    # Email polling configuration
+    email_polling_enabled: bool = Field(default=True, description="Enable/disable email polling globally")
+    email_polling_interval: int = Field(default=60, description="Email polling interval in seconds")
+    
+    # Email spam filtering configuration
+    email_spam_filter_enabled: bool = Field(default=True, description="Enable/disable spam filtering for incoming emails")
+    email_filter_promotions: bool = Field(default=True, description="Filter promotional emails and ads (in addition to spam)")
+    email_log_filtered: bool = Field(default=False, description="Log filtered emails to database for review")
+    email_ml_classifier_enabled: bool = Field(default=True, description="Enable ML-based spam classification (requires trained model)")
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -41,7 +51,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    @field_validator("ai_reply_window_seconds", "ai_reply_max_per_window", "openai_max_retries")
+    @field_validator("ai_reply_window_seconds", "ai_reply_max_per_window", "openai_max_retries", "email_polling_interval")
     @classmethod
     def validate_positive_integers(cls, v: int) -> int:
         """Ensure positive integers for numeric settings."""

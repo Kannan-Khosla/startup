@@ -22,11 +22,15 @@ from auth import (
 from storage import upload_file, download_file, delete_file, list_attachments
 from email_service import email_service
 from routing_service import routing_service
+from email_polling_service import email_polling_service
+from spam_classifier import spam_classifier
 import re
 import time
 import io
 import base64
 import json
+import asyncio
+from contextlib import asynccontextmanager
 
 # Set up logging
 logger = setup_logger(__name__)
@@ -34,8 +38,51 @@ logger = setup_logger(__name__)
 # Initialize OpenAI client
 client = OpenAI(api_key=settings.openai_api_key)
 
-# Create FastAPI app
-app = FastAPI(title="AI Support API", version="1.0.0")
+
+# Background task for email polling
+async def email_polling_task():
+    """Background task that polls email accounts periodically."""
+    while True:
+        try:
+            if settings.email_polling_enabled:
+                logger.debug("Starting email polling cycle")
+                # Run synchronous polling in executor to avoid blocking event loop
+                loop = asyncio.get_event_loop()
+                result = await loop.run_in_executor(None, email_polling_service.poll_all_accounts)
+                if result.get("success"):
+                    if result.get("total_tickets", 0) > 0:
+                        logger.info(f"Email polling: {result.get('total_emails', 0)} emails processed, {result.get('total_tickets', 0)} tickets created")
+                else:
+                    logger.warning(f"Email polling failed: {result.get('error')}")
+            else:
+                logger.debug("Email polling is disabled")
+            
+            # Wait for the configured interval
+            await asyncio.sleep(settings.email_polling_interval)
+        except Exception as e:
+            logger.error(f"Error in email polling task: {e}", exc_info=True)
+            # Wait before retrying on error
+            await asyncio.sleep(settings.email_polling_interval)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager for startup and shutdown events."""
+    # Startup
+    logger.info("Starting email polling background task")
+    polling_task = asyncio.create_task(email_polling_task())
+    yield
+    # Shutdown
+    logger.info("Shutting down email polling background task")
+    polling_task.cancel()
+    try:
+        await polling_task
+    except asyncio.CancelledError:
+        pass
+
+
+# Create FastAPI app with lifespan
+app = FastAPI(title="AI Support API", version="1.0.0", lifespan=lifespan)
 
 # Register error handlers
 app.add_exception_handler(Exception, error_handler)
@@ -141,6 +188,9 @@ class EmailAccountRequest(BaseModel):
     credentials: dict | None = None
     is_active: bool = True
     is_default: bool = False
+    imap_host: str | None = None
+    imap_port: int | None = None
+    imap_enabled: bool = False
 
 
 class SendEmailRequest(BaseModel):
@@ -3064,6 +3114,9 @@ def create_email_account(
             "credentials_encrypted": credentials_encrypted,
             "is_active": req.is_active,
             "is_default": req.is_default,
+            "imap_host": req.imap_host,
+            "imap_port": req.imap_port,
+            "imap_enabled": req.imap_enabled,
             "created_by": current_admin["id"],
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -3121,7 +3174,7 @@ def list_email_accounts(
         
         result = (
             supabase.table("email_accounts")
-            .select("id, email, display_name, provider, is_active, is_default, created_at, updated_at")
+            .select("id, email, display_name, provider, is_active, is_default, imap_enabled, last_polled_at, created_at, updated_at")
             .order("created_at", desc=True)
             .execute()
         )
@@ -3165,6 +3218,214 @@ def test_email_account(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to test email account",
+        )
+
+
+@app.post("/admin/email-accounts/{account_id}/test-imap")
+def test_imap_connection(
+    account_id: str,
+    current_admin: dict = Depends(get_current_admin),
+):
+    """Test IMAP connection for an email account."""
+    try:
+        if supabase is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not configured",
+            )
+        
+        result = email_service.test_imap_connection(account_id)
+        
+        if result.get("success"):
+            return {"success": True, "message": result.get("message", "IMAP connection successful")}
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=result.get("error", "IMAP connection failed")
+            )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in test_imap_connection: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to test IMAP connection",
+        )
+
+
+@app.post("/admin/email-accounts/{account_id}/enable-polling")
+def enable_email_polling(
+    account_id: str,
+    current_admin: dict = Depends(get_current_admin),
+):
+    """Enable IMAP polling for an email account."""
+    try:
+        if supabase is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not configured",
+            )
+        
+        # Verify account exists
+        account_res = (
+            supabase.table("email_accounts")
+            .select("id, email, is_active")
+            .eq("id", account_id)
+            .limit(1)
+            .execute()
+        )
+        
+        if not account_res.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Email account not found"
+            )
+        
+        account = account_res.data[0]
+        
+        if not account.get("is_active"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot enable polling for inactive account"
+            )
+        
+        # Enable polling
+        result = (
+            supabase.table("email_accounts")
+            .update({
+                "imap_enabled": True,
+                "updated_at": datetime.now(timezone.utc).isoformat()
+            })
+            .eq("id", account_id)
+            .execute()
+        )
+        
+        logger.info(f"Enabled IMAP polling for account {account.get('email')} by {current_admin['email']}")
+        
+        return {
+            "success": True,
+            "message": "Email polling enabled",
+            "account": result.data[0] if result.data else None
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in enable_email_polling: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to enable email polling",
+        )
+
+
+@app.post("/admin/email-accounts/{account_id}/disable-polling")
+def disable_email_polling(
+    account_id: str,
+    current_admin: dict = Depends(get_current_admin),
+):
+    """Disable IMAP polling for an email account."""
+    try:
+        if supabase is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not configured",
+            )
+        
+        # Verify account exists
+        account_res = (
+            supabase.table("email_accounts")
+            .select("id, email")
+            .eq("id", account_id)
+            .limit(1)
+            .execute()
+        )
+        
+        if not account_res.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Email account not found"
+            )
+        
+        account = account_res.data[0]
+        
+        # Disable polling
+        result = (
+            supabase.table("email_accounts")
+            .update({
+                "imap_enabled": False,
+                "updated_at": datetime.now(timezone.utc).isoformat()
+            })
+            .eq("id", account_id)
+            .execute()
+        )
+        
+        logger.info(f"Disabled IMAP polling for account {account.get('email')} by {current_admin['email']}")
+        
+        return {
+            "success": True,
+            "message": "Email polling disabled",
+            "account": result.data[0] if result.data else None
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in disable_email_polling: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to disable email polling",
+        )
+
+
+@app.get("/admin/email-accounts/{account_id}/polling-status")
+def get_polling_status(
+    account_id: str,
+    current_admin: dict = Depends(get_current_admin),
+):
+    """Get polling status for an email account."""
+    try:
+        if supabase is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not configured",
+            )
+        
+        account_res = (
+            supabase.table("email_accounts")
+            .select("id, email, imap_enabled, is_active, last_polled_at, imap_host, imap_port")
+            .eq("id", account_id)
+            .limit(1)
+            .execute()
+        )
+        
+        if not account_res.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Email account not found"
+            )
+        
+        account = account_res.data[0]
+        
+        return {
+            "success": True,
+            "account_id": account_id,
+            "email": account.get("email"),
+            "imap_enabled": account.get("imap_enabled", False),
+            "is_active": account.get("is_active", False),
+            "last_polled_at": account.get("last_polled_at"),
+            "imap_host": account.get("imap_host"),
+            "imap_port": account.get("imap_port"),
+            "can_poll": account.get("imap_enabled", False) and account.get("is_active", False)
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in get_polling_status: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to get polling status",
         )
 
 
@@ -3345,10 +3606,57 @@ async def receive_email_webhook(
                 detail="Failed to parse email"
             )
         
+        # Spam filtering - check if email should be filtered
+        from_email = parsed.get("from_email", "")
+        if settings.email_spam_filter_enabled:
+            # Check if sender is a registered user (less likely to be spam)
+            is_registered_user = False
+            if from_email:
+                user_res = (
+                    supabase.table("users")
+                    .select("id")
+                    .eq("email", from_email.lower())
+                    .limit(1)
+                    .execute()
+                )
+                is_registered_user = bool(user_res.data)
+            
+            # If not a registered user, check spam classification
+            if not is_registered_user:
+                if spam_classifier.should_filter(parsed, filter_promotions=settings.email_filter_promotions):
+                    classification = spam_classifier.classify(parsed)
+                    logger.info(
+                        f"Filtered {classification['category']} email from {from_email} via webhook: "
+                        f"{', '.join(classification['reasons'][:3])}"
+                    )
+                    # Optionally log filtered emails for review
+                    if settings.email_log_filtered:
+                        try:
+                            default_account = email_service.get_default_email_account()
+                            if default_account:
+                                supabase.table("email_messages").insert({
+                                    "email_account_id": default_account["id"],
+                                    "message_id": parsed.get("message_id", ""),
+                                    "subject": parsed.get("subject", ""),
+                                    "body_text": parsed.get("body_text", "")[:500],
+                                    "from_email": from_email,
+                                    "to_email": parsed.get("to_emails", []),
+                                    "status": "filtered",
+                                    "direction": "inbound",
+                                    "created_at": datetime.now(timezone.utc).isoformat(),
+                                }).execute()
+                        except Exception as e:
+                            logger.warning(f"Failed to log filtered email: {e}")
+                    return {
+                        "success": True,
+                        "message": "Email filtered as spam/promotion",
+                        "filtered": True,
+                        "category": classification["category"]
+                    }
+        
         # Find or create ticket
         ticket_id = None
         subject = parsed.get("subject", "")
-        from_email = parsed.get("from_email", "")
         
         # Check if this is a reply to an existing ticket
         in_reply_to = parsed.get("in_reply_to", "")
